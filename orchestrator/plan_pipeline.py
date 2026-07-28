@@ -45,7 +45,15 @@ import logging
 
 from agents.developer import DeveloperLintError, OpenAIDeveloperAgent
 from agents.gui_tester import OpenAIGUITesterAgent
-from agents.models import LaunchConfig, LaunchType, Phase, PhaseStatus
+from agents.models import (
+    GUITestResult,
+    LaunchConfig,
+    LaunchType,
+    Phase,
+    PhaseStatus,
+    ReplanContext,
+    ReviewResult,
+)
 from agents.planner import OpenAIPlannerAgent
 from agents.report import GUIAttemptRecord, PhaseReportRecord
 from agents.reviewer import OpenAIReviewerAgent
@@ -62,6 +70,7 @@ TERMINAL_STATUSES = {
     PhaseStatus.REVIEW_FAILED.value,
     PhaseStatus.GUI_TEST_FAILED.value,
     PhaseStatus.GUI_VERIFIED.value,
+    PhaseStatus.SKIPPED.value,
 }
 
 APP_FILES = ("index.html", "style.css", "app.js")
@@ -84,6 +93,7 @@ class PlanDrivenPipeline:
 
     def run_all_phases(self, requirement: str) -> None:
         self.planner.start_report(requirement)
+        resumable_statuses = {PhaseStatus.GUI_VERIFIED.value, PhaseStatus.SKIPPED.value}
 
         plan = self._load_plan()
         for phase_dict in plan["phases"]:
@@ -94,20 +104,155 @@ class PlanDrivenPipeline:
                     phase_id,
                     phase_dict["status"],
                 )
-                if phase_dict["status"] != PhaseStatus.GUI_VERIFIED.value:
+                if phase_dict["status"] not in resumable_statuses:
                     break
                 continue
 
             print(f"[{phase_id}] 시작: {phase_dict['title']}")
-            ok = self.run_phase(phase_id)
+            outcome = self.run_phase_with_replanning(phase_id)
             final_status = self._load_phase_dict(phase_id)["status"]
-            print(f"[{phase_id}] 완료: {final_status}")
-            if not ok:
-                logger.error("PlanPipeline: stopping -- phase=%s did not complete successfully", phase_id)
+            print(f"[{phase_id}] 완료: {final_status} ({outcome})")
+
+            if outcome == "aborted":
+                logger.error("PlanPipeline: stopping -- human chose to abort at phase=%s", phase_id)
                 break
 
         self.planner.finalize_report(self._build_final_files_summary())
         self.gui_tester.cleanup()
+
+    # ---- replan + human escalation (Phase 5) ------------------------------
+
+    def run_phase_with_replanning(self, phase_id: str) -> str:
+        """Run a Phase via run_phase(); if it exhausts its own review/GUI
+        retry budgets, ask the Planner to replan (up to
+        config.max_replan_attempts times) -- explicitly telling it not to
+        repeat the same approach -- instead of just giving up. If it still
+        fails after replanning, escalate to a human on the console.
+
+        replan() can split one Phase into several -- all of them get
+        processed (each with its own fresh replan budget) before this
+        returns, not just the first. Returns "success" (all of them did),
+        "skipped" (at least one was skipped by a human but the rest still
+        got processed), or "aborted" (a human stopped everything, possibly
+        leaving some split-off phases untouched)."""
+        queue = [phase_id]
+        saw_skip = False
+
+        while queue:
+            current_phase_id = queue.pop(0)
+            outcome, followups = self._run_single_phase_with_replanning(current_phase_id)
+            if outcome == "aborted":
+                return "aborted"
+            if outcome == "skipped":
+                saw_skip = True
+            queue = followups + queue
+
+        return "skipped" if saw_skip else "success"
+
+    def _run_single_phase_with_replanning(self, phase_id: str) -> tuple[str, list[str]]:
+        """Handles one phase_id's own replan+escalation loop (its own
+        fresh replan_round budget). Returns (outcome, followup_phase_ids)
+        -- followups are any additional Phases a replan() call produced
+        besides the one actually retried (current_phase_id always follows
+        new_phases[0]; the rest queue up for the caller)."""
+        current_phase_id = phase_id
+        replan_round = 0
+        human_feedback: str | None = None
+        followups: list[str] = []
+
+        while True:
+            ok = self.run_phase(current_phase_id)
+            if ok:
+                return "success", followups
+
+            reason = self._describe_failure(current_phase_id)
+
+            if replan_round < self.config.max_replan_attempts:
+                replan_round += 1
+                print(
+                    f"[{current_phase_id}] 재계획 시도 {replan_round}/{self.config.max_replan_attempts}: {reason}"
+                )
+                context = self._build_replan_context(current_phase_id, reason, human_feedback)
+                human_feedback = None
+                new_phase_ids = self._replan_from(current_phase_id, context)
+                current_phase_id = new_phase_ids[0]
+                followups = new_phase_ids[1:] + followups
+                continue
+
+            context = self._build_replan_context(current_phase_id, reason, human_feedback)
+            outcome = self.planner.request_human_escalation(context)
+            self._update_phase(current_phase_id, human_escalated=True, human_escalation_choice=outcome)
+
+            if outcome == "ABORT":
+                print(f"[{current_phase_id}] 사람이 전체 중단을 선택했습니다.")
+                return "aborted", followups
+            if outcome == "SKIP":
+                self._update_phase(current_phase_id, status=PhaseStatus.SKIPPED)
+                print(f"[{current_phase_id}] 사람이 스킵을 선택했습니다.")
+                return "skipped", followups
+            if outcome.startswith("CUSTOM: "):
+                human_feedback = outcome[len("CUSTOM: ") :]
+                replan_round = 0  # human guidance gets its own fresh replan budget
+                print(f"[{current_phase_id}] 사람이 방향을 제시했습니다 -- 재계획을 다시 시도합니다.")
+                continue
+
+            # "RETRY" -- try the exact same phase again from scratch. Doesn't
+            # reset replan_round, so a second failure re-escalates instead of
+            # silently burning through another automatic replan round.
+            print(f"[{current_phase_id}] 사람이 재시도를 선택했습니다.")
+            self._update_phase(current_phase_id, status=PhaseStatus.PENDING)
+            continue
+
+    def _replan_from(self, phase_id: str, context: ReplanContext) -> list[str]:
+        new_phases = self.planner.replan(context)
+        for new_phase in new_phases:
+            self._update_phase(
+                new_phase.id, replanned_from=phase_id, replan_reason=context.reason
+            )
+        return [p.id for p in new_phases]
+
+    def _describe_failure(self, phase_id: str) -> str:
+        phase_dict = self._load_phase_dict(phase_id)
+        status = phase_dict["status"]
+        if status == PhaseStatus.LINT_FAILED.value:
+            return f"Lint 실패 ({phase_dict.get('lint_attempts', '?')}회 시도)"
+        if status == PhaseStatus.REVIEW_FAILED.value:
+            return f"코드 리뷰 실패 (재시도 {phase_dict.get('review_retry_count', '?')}회)"
+        if status == PhaseStatus.GUI_TEST_FAILED.value:
+            symptom = phase_dict.get("gui_last_symptom") or ""
+            return f"GUI 검증 실패 (재시도 {phase_dict.get('gui_retry_count', '?')}회) -- {symptom}"
+        return f"알 수 없는 실패 상태: {status}"
+
+    def _build_replan_context(
+        self, phase_id: str, reason: str, human_feedback: str | None
+    ) -> ReplanContext:
+        phase_dict = self._load_phase_dict(phase_id)
+        phase = self._load_phase(phase_id)
+
+        review_attempts = [
+            ReviewResult(phase_id=phase_id, passed=False, issues=issues)
+            for issues in phase_dict.get("review_rejected_issues", [])
+        ]
+
+        gui_attempts: list[GUITestResult] = []
+        gui_retry_count = phase_dict.get("gui_retry_count", 0)
+        if gui_retry_count:
+            last_symptom = phase_dict.get("gui_last_symptom") or ""
+            gui_attempts = [
+                GUITestResult(
+                    phase_id=phase_id,
+                    passed=False,
+                    issues=[f"(총 {gui_retry_count}회 실패) {last_symptom}"],
+                )
+            ]
+
+        return ReplanContext(
+            phase=phase,
+            review_attempts=review_attempts,
+            gui_attempts=gui_attempts,
+            reason=reason,
+            human_feedback=human_feedback,
+        )
 
     def run_phase(self, phase_id: str) -> bool:
         """Run one Phase through Developer -> Reviewer/debug -> GUI Tester
@@ -209,7 +354,11 @@ class PlanDrivenPipeline:
 
             if gui_retry_count >= self.config.max_gui_test_retries:
                 self._update_phase(
-                    phase.id, status=PhaseStatus.GUI_TEST_FAILED, gui_retry_count=gui_retry_count
+                    phase.id,
+                    status=PhaseStatus.GUI_TEST_FAILED,
+                    gui_retry_count=gui_retry_count,
+                    gui_last_symptom=result.symptom,
+                    gui_last_criterion_failed=result.criterion_failed,
                 )
                 logger.error(
                     "PlanPipeline: phase=%s marked gui_test_failed after %d attempt(s)",
@@ -218,7 +367,12 @@ class PlanDrivenPipeline:
                 )
                 return False, attempts
 
-            self._update_phase(phase.id, gui_retry_count=gui_retry_count)
+            self._update_phase(
+                phase.id,
+                gui_retry_count=gui_retry_count,
+                gui_last_symptom=result.symptom,
+                gui_last_criterion_failed=result.criterion_failed,
+            )
             issues = [self._format_gui_issue(result)]
             logger.info("PlanPipeline: phase=%s requesting Developer rewrite from GUI feedback", phase.id)
             self.developer.implement(phase, review_issues=issues)
@@ -259,6 +413,15 @@ class PlanDrivenPipeline:
                 )
                 for i, attempt in enumerate(gui_attempts)
             ],
+            replanned=bool(phase_dict.get("replanned_from")),
+            replan_notes=(
+                f"'{phase_dict['replanned_from']}' Phase가 반복 실패하여 재계획으로 생성됨 "
+                f"-- {phase_dict.get('replan_reason', '')}"
+                if phase_dict.get("replanned_from")
+                else ""
+            ),
+            human_escalated=bool(phase_dict.get("human_escalated")),
+            human_feedback=str(phase_dict.get("human_escalation_choice", "")),
         )
         self.planner.record_phase_report(record)
 

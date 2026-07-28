@@ -1,15 +1,24 @@
-"""Manual smoke test for step 4-4: the plan.json-driven pipeline's GUI
-Tester <-> Developer rewrite loop, using debug bug injection (step 4-5) to
-force a real GUI-verification failure without waiting for a real bug.
+"""Manual smoke test for the full replan/escalation loop
+(PlanDrivenPipeline.run_phase_with_replanning), using debug bug injection
+to force a real, repeated GUI-verification failure without waiting for a
+real bug.
 
 Requires .env to have DEBUG_INJECT_BUG=true and DEBUG_INJECT_PHASE_ID set
 to a phase that's currently "pending" (or "dev_done") in state/plan.json.
-Runs just that one phase (PlanDrivenPipeline.run_phase), not the whole
-plan, so this stays fast: Developer implements it -> Reviewer is skipped
--> a deliberate bug is injected -> GUI Tester should catch it and fail ->
-Developer rewrites from that feedback -> GUI Tester should pass this time.
+To reliably exhaust the GUI retry budget on the first injected-bug failure
+(rather than relying on the Developer's rewrite failing to fix it, which
+it usually doesn't), also temporarily lower MAX_GUI_TEST_RETRIES=1.
 
-This is NOT headless -- don't touch the mouse/keyboard while it runs.
+Runs just that one phase, not the whole plan: Developer implements it ->
+Reviewer is skipped -> a deliberate bug is injected -> GUI Tester catches
+it and (with the retry budget exhausted) the Planner is asked to replan
+-> the replanned phase should implement/verify cleanly since the bug
+doesn't get reintroduced.
+
+This is NOT headless -- don't touch the mouse/keyboard while it runs. If
+MAX_REPLAN_ATTEMPTS is also exhausted, this will block on console input
+(the human escalation menu) -- a "yes 1 |" prefix answers any such prompt
+with "1) retry" as a safety net.
 
 Usage:
     uv run python scripts/smoke_test_plan_pipeline.py
@@ -40,6 +49,7 @@ def main() -> None:
 
     config = PipelineConfig()
     print(f"DEBUG_INJECT_BUG={config.debug_inject_bug} DEBUG_INJECT_PHASE_ID={config.debug_inject_phase_id}")
+    print(f"MAX_GUI_TEST_RETRIES={config.max_gui_test_retries} MAX_REPLAN_ATTEMPTS={config.max_replan_attempts}")
     if not config.debug_inject_bug or not config.debug_inject_phase_id:
         raise SystemExit("Set DEBUG_INJECT_BUG=true and DEBUG_INJECT_PHASE_ID in .env before running this.")
 
@@ -56,19 +66,20 @@ def main() -> None:
     phase_id = config.debug_inject_phase_id
     report_path = planner.start_report(REQUIREMENT)
     try:
-        ok = pipeline.run_phase(phase_id)
+        outcome = pipeline.run_phase_with_replanning(phase_id)
     finally:
         planner.finalize_report(pipeline._build_final_files_summary())
         gui_tester.cleanup()
 
     plan = json.loads(config.plan_file.read_text(encoding="utf-8"))
-    phase_dict = next(p for p in plan["phases"] if p["id"] == phase_id)
+    replanned_phases = [p for p in plan["phases"] if p.get("replanned_from") == phase_id]
 
     print()
-    print(f"run_phase({phase_id!r}) returned: {ok}")
-    print(f"final status: {phase_dict['status']}")
-    print(f"gui_retry_count: {phase_dict.get('gui_retry_count')}")
-    print(f"review_skipped_debug: {phase_dict.get('review_skipped_debug')}")
+    print(f"run_phase_with_replanning({phase_id!r}) returned: {outcome}")
+    original = next((p for p in plan["phases"] if p["id"] == phase_id), None)
+    print(f"original phase status: {original['status'] if original else '(replaced)'}")
+    for p in replanned_phases:
+        print(f"replanned phase: {p['id']} status={p['status']} (from {p['replanned_from']})")
     print(f"report: {report_path}")
 
 

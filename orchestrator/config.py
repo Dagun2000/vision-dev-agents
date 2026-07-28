@@ -12,6 +12,7 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 TARGET_APP_DIR = ROOT_DIR / "target-app"
 STATE_DIR = ROOT_DIR / "state"
 LOGS_DIR = ROOT_DIR / "logs"
+CONFIG_DIR = ROOT_DIR / "config"
 
 load_dotenv(ROOT_DIR / ".env", encoding="utf-8")
 
@@ -46,3 +47,4 @@ class PipelineConfig:
     state_file: Path = STATE_DIR / "pipeline_state.json"
     plan_file: Path = STATE_DIR / "plan.json"
     screenshots_dir: Path = LOGS_DIR / "screenshots"
+    requirement_file: Path = CONFIG_DIR / "requirement.txt"

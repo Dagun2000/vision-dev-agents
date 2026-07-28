@@ -23,6 +23,7 @@ class PhaseStatus(str, Enum):
     PASSED = "passed"
     FAILED = "failed"
     ESCALATED = "escalated"
+    SKIPPED = "skipped"
 
 
 class LaunchType(str, Enum):

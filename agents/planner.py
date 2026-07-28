@@ -1,8 +1,5 @@
-"""Planner agent implementation.
-
-Only the initial-plan-generation responsibility (create_plan) is
-implemented in this step. replan / request_human_escalation /
-summarize_report are intentionally left as stubs for a later step.
+"""Planner agent implementation: create_plan, replan, human escalation, and
+the incremental development report.
 """
 
 from __future__ import annotations
@@ -22,6 +19,29 @@ from agents.schemas import PlanSchema
 from orchestrator.config import PipelineConfig
 
 logger = logging.getLogger("pipeline")
+
+APP_FILES = ("index.html", "style.css", "app.js")
+
+REPLAN_SYSTEM_PROMPT = """\
+당신은 멀티 에이전트 자동 개발 파이프라인의 기획자(Planner) 에이전트입니다.
+아래 Phase가 개발자<->리뷰어 또는 개발자<->GUI검증 루프를 반복해도 통과하지
+못했습니다. 같은 접근을 그대로 반복시키는 재계획은 의미가 없습니다.
+
+다음 두 전략 중 실패 이력에 비추어 더 적절한 쪽을 선택해 새로운 Phase
+목록을 만드세요 (실패한 Phase 하나를 이 목록으로 대체합니다):
+1. Phase를 더 작은 단위로 쪼개기 -- 각 단위가 독립적으로 구현·검증 가능하도록
+   (예: "완료 체크 + 삭제"를 "완료 체크"와 "삭제"로 분리)
+2. 요구사항 범위를 좁히거나 다른 구현 방식으로 우회하기 -- 반복 실패의
+   근본 원인(예: 특정 UI 패턴, 특정 상호작용 방식)을 피하는 다른 방식 제안
+
+규칙:
+- id는 "<원래 Phase id>-a", "<원래 Phase id>-b"... 형식으로 접미사를 붙여
+  기존 id와 충돌하지 않게 하세요.
+- status는 항상 "pending"으로 설정하세요.
+- 이미 완료된 이전 Phase들의 누적 코드 위에서 이어서 작업해야 하므로, 그
+  코드와 상충하지 않는 계획을 세우세요.
+- success_criteria는 화면에서 관찰 가능한 구체적인 결과로 작성하세요.
+"""
 
 SYSTEM_PROMPT = """\
 당신은 멀티 에이전트 자동 개발 파이프라인의 기획자(Planner) 에이전트입니다.
@@ -100,15 +120,135 @@ class OpenAIPlannerAgent(PlannerAgent):
         )
 
     def replan(self, context: ReplanContext) -> list[Phase]:
-        raise NotImplementedError("OpenAIPlannerAgent.replan is not implemented yet")
+        """Ask the model to replace context.phase with 1+ new Phases,
+        given its full failure history -- not just "try again", but an
+        explicit instruction to split scope or change approach. Splices
+        the result into plan.json in place of the old phase and returns
+        the new Phase objects (the caller resumes from new_phases[0])."""
+        logger.info("Planner: replanning phase=%s reason=%s", context.phase.id, context.reason)
+        user_message = self._build_replan_message(context)
+        response = self.client.responses.parse(
+            model=self.config.planner_model,
+            input=[
+                {"role": "system", "content": REPLAN_SYSTEM_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
+            text_format=PlanSchema,
+        )
+        plan = response.output_parsed
+        if plan is None or not plan.phases:
+            raise ValueError("Planner returned an empty or unparseable replan")
 
-    def request_human_escalation(self, context: ReplanContext) -> str:
-        raise NotImplementedError(
-            "OpenAIPlannerAgent.request_human_escalation is not implemented yet"
+        new_phases = [
+            Phase(
+                id=item.id,
+                title=item.title,
+                description=item.description,
+                success_criteria=item.success_criteria,
+                status=PhaseStatus.PENDING,
+            )
+            for item in plan.phases
+        ]
+        self._splice_phases(context.phase.id, new_phases)
+        logger.info(
+            "Planner: replan produced %d phase(s) replacing %s: %s",
+            len(new_phases),
+            context.phase.id,
+            [p.id for p in new_phases],
+        )
+        return new_phases
+
+    def _build_replan_message(self, context: ReplanContext) -> str:
+        criteria = "\n".join(f"- {c}" for c in context.phase.success_criteria)
+        review_issues_text = (
+            "\n".join(
+                f"{i + 1}차 리뷰 반려 사유: {', '.join(r.issues) or '(사유 없음)'}"
+                for i, r in enumerate(context.review_attempts)
+            )
+            or "(리뷰 실패 없음)"
+        )
+        gui_issues_text = (
+            "\n".join(
+                f"GUI 검증 시도 {i + 1}: {', '.join(g.issues) or '(사유 없음)'}"
+                for i, g in enumerate(context.gui_attempts)
+            )
+            or "(GUI 검증 실패 없음)"
         )
 
+        parts = [
+            f"## 실패한 Phase\nid: {context.phase.id}\n제목: {context.phase.title}\n설명: {context.phase.description}",
+            f"\n## 성공 조건\n{criteria}",
+            f"\n## 실패 사유\n{context.reason}",
+            f"\n## 리뷰 실패 이력\n{review_issues_text}",
+            f"\n## GUI 검증 실패 이력\n{gui_issues_text}",
+        ]
+        if context.human_feedback:
+            parts.append(f"\n## 사람이 제시한 방향 (반드시 반영할 것)\n{context.human_feedback}")
+
+        files_text = "\n".join(
+            f"### {name}\n```\n{content}\n```"
+            for name, content in self._read_current_target_app_files().items()
+            if content
+        )
+        parts.append(f"\n## 현재까지 누적된 target-app/ 코드 (이전 Phase까지 완료된 상태)\n{files_text}")
+        return "\n".join(parts)
+
+    def _read_current_target_app_files(self) -> dict[str, str]:
+        files: dict[str, str] = {}
+        for name in APP_FILES:
+            path = self.config.target_app_dir / name
+            files[name] = path.read_text(encoding="utf-8") if path.exists() else ""
+        return files
+
+    def _splice_phases(self, old_phase_id: str, new_phases: list[Phase]) -> None:
+        plan_data = json.loads(self.config.plan_file.read_text(encoding="utf-8"))
+        index = next(
+            (i for i, p in enumerate(plan_data["phases"]) if p["id"] == old_phase_id), None
+        )
+        if index is None:
+            raise ValueError(f"plan.json has no phase with id={old_phase_id!r}")
+
+        new_dicts = [asdict(phase) for phase in new_phases]
+        plan_data["phases"][index : index + 1] = new_dicts
+        self.config.plan_file.write_text(
+            json.dumps(plan_data, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+
+    def request_human_escalation(self, context: ReplanContext) -> str:
+        """Print a situation summary + menu, block on console input, and
+        return one of a small fixed vocabulary the caller (PlanDrivenPipeline)
+        parses: "RETRY", "SKIP", "ABORT", or "CUSTOM: <free-text guidance>".
+
+        The PlannerAgent ABC's request_human_escalation() -> str contract
+        predates this menu design; encoding the choice as a prefixed string
+        keeps that contract instead of widening the interface for one caller.
+        """
+        print()
+        print(f">>> Phase {context.phase.id} 재계획 후에도 {context.reason}")
+        print("    [1] 이대로 한 번 더 재시도   [2] 수정 방향 직접 입력")
+        print("    [3] 이 Phase 스킵하고 계속 진행   [4] 전체 중단")
+        choice = input(">>> 선택 (1-4): ").strip()
+
+        if choice == "2":
+            feedback = input(">>> 수정 방향을 입력하세요: ").strip()
+            logger.info("Planner: human escalation phase=%s choice=CUSTOM", context.phase.id)
+            return f"CUSTOM: {feedback}"
+        if choice == "3":
+            logger.info("Planner: human escalation phase=%s choice=SKIP", context.phase.id)
+            return "SKIP"
+        if choice == "4":
+            logger.info("Planner: human escalation phase=%s choice=ABORT", context.phase.id)
+            return "ABORT"
+
+        logger.info("Planner: human escalation phase=%s choice=RETRY", context.phase.id)
+        return "RETRY"
+
     def summarize_report(self, phases: list[Phase]) -> str:
-        raise NotImplementedError("OpenAIPlannerAgent.summarize_report is not implemented yet")
+        raise NotImplementedError(
+            "OpenAIPlannerAgent.summarize_report is not implemented yet -- "
+            "use start_report()/record_phase_report()/finalize_report() instead, "
+            "which already produce the incremental Markdown development report"
+        )
 
     # ---- incremental development report ---------------------------------
     #

@@ -44,6 +44,7 @@ from agents.gui.detection import (
 from agents.gui.execution import (
     BrowserWindow,
     capture_screenshot,
+    clear_local_storage,
     click_at,
     close_window,
     enable_windows_dpi_awareness,
@@ -64,6 +65,10 @@ MAX_GUI_STEPS = 8
 # it keep retrying the same wrong coordinates.
 CONSECUTIVE_INEFFECTIVE_LIMIT = 2
 ACTION_SETTLE_SECONDS = 0.5
+# Lets launch_app()'s own Ctrl+R reload settle before clear_local_storage()
+# drives the address bar again -- back-to-back keystroke sequences on a
+# still-loading page can race and silently no-op.
+LOCAL_STORAGE_CLEAR_SETTLE_SECONDS = 1.0
 # Margin (px) added around an action's target box when diffing just that
 # region -- just enough to catch visual feedback that overflows the box
 # slightly (typed text, a checkbox's strikethrough label), without pulling
@@ -225,6 +230,20 @@ class OpenAIGUITesterAgent(GUITesterAgent):
 
         server, window = self.launch_app(phase.launch_config)
         try:
+            # launch_app() (open_browser_maximized) just did its own Ctrl+R
+            # reload as its last step -- give that a moment to actually
+            # settle before clear_local_storage() drives the address bar
+            # again, or the two keystroke sequences can race.
+            time.sleep(LOCAL_STORAGE_CLEAR_SETTLE_SECONDS)
+
+            # Fresh start each Phase -- otherwise a previous Phase's (or a
+            # human's manual testing) leftover localStorage data would
+            # still be sitting there when this Phase's criteria get judged.
+            if not clear_local_storage(window):
+                logger.warning(
+                    "GUI: phase=%s localStorage clear failed -- continuing anyway", phase.id
+                )
+
             current_image = capture_screenshot(window)
 
             for step in range(1, max_steps + 1):

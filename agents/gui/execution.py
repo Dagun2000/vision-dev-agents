@@ -180,14 +180,43 @@ def exit_fullscreen() -> None:
 
 
 def capture_screenshot(window: BrowserWindow) -> Image.Image:
+    """Screenshot `window`'s region. Re-activates the window by hwnd first:
+    pyautogui.screenshot() captures whatever pixels are physically at that
+    screen region regardless of focus, so if something else (e.g. the user
+    switching to another app while an LLM call was in flight) ended up on
+    top of our window, a stale `window.region` would otherwise silently
+    screenshot the wrong app -- confirmed happening in practice, not just
+    a theoretical risk.
+    """
+    _reactivate_if_possible(window)
     return pyautogui.screenshot(region=window.region)
 
 
 def click_at(window: BrowserWindow, local_x: int, local_y: int) -> None:
     """Click a point given in screenshot-local coordinates (i.e. relative
-    to `window`'s top-left, exactly what BoundingBox.center gives you)."""
+    to `window`'s top-left, exactly what BoundingBox.center gives you).
+    Re-activates the window first for the same reason as capture_screenshot."""
+    _reactivate_if_possible(window)
     pyautogui.click(window.left + local_x, window.top + local_y)
     time.sleep(CLICK_SETTLE_SECONDS)
+
+
+def _reactivate_if_possible(window: BrowserWindow) -> None:
+    live_window = _find_live_window(window)
+    if live_window is not None:
+        _activate(live_window)
+
+
+def _find_live_window(window: BrowserWindow):
+    """Look up the live pygetwindow object for `window`'s hwnd -- its own
+    left/top/width/height are a snapshot, but a few operations (closing,
+    re-activating before typing) need the actual current window object."""
+    if window.hwnd is None:
+        return None
+    for candidate in gw.getAllWindows():
+        if candidate._hWnd == window.hwnd:
+            return candidate
+    return None
 
 
 def close_window(window: BrowserWindow) -> bool:
@@ -199,16 +228,51 @@ def close_window(window: BrowserWindow) -> bool:
         logger.warning("GUI: no window handle recorded, can't close browser window")
         return False
     try:
-        for candidate in gw.getAllWindows():
-            if candidate._hWnd == window.hwnd:
-                candidate.close()
-                return True
+        live_window = _find_live_window(window)
+        if live_window is not None:
+            live_window.close()
+            return True
     except Exception as exc:
         logger.warning("GUI: failed to close browser window (%s)", exc)
         return False
 
     logger.warning("GUI: browser window (hwnd=%s) no longer exists, nothing to close", window.hwnd)
     return False
+
+
+CLEAR_STORAGE_JS_URL = "javascript:localStorage.clear();location.reload();"
+ADDRESS_BAR_WAIT_SECONDS = 0.3
+CLEAR_STORAGE_TYPE_INTERVAL = 0.01
+
+
+def clear_local_storage(window: BrowserWindow) -> bool:
+    """Clear the page's localStorage and reload, so no data from a
+    previous Phase's manual/automated testing leaks into the next one.
+
+    Done via a `javascript:` URL typed into the address bar (Ctrl+L),
+    since this execution layer is OS-level only (PyAutoGUI) -- there's no
+    DOM/browser API here to call localStorage.clear() directly. It must be
+    *typed* (pyautogui.typewrite), not pasted: Chrome strips a pasted
+    "javascript:" prefix as an anti-self-XSS measure, but doesn't block
+    typed keystrokes. Ctrl+L still reaches the address bar even in F11
+    fullscreen (Chrome/Edge show a temporary overlay for it).
+
+    Best-effort: returns False (never raises) if the window can't be
+    found, so callers can log a warning and continue rather than fail the
+    whole verification run over this.
+    """
+    live_window = _find_live_window(window)
+    if live_window is None:
+        logger.warning("GUI: could not find browser window to clear localStorage")
+        return False
+
+    _activate(live_window)
+    pyautogui.hotkey("ctrl", "l")
+    time.sleep(ADDRESS_BAR_WAIT_SECONDS)
+    pyautogui.typewrite(CLEAR_STORAGE_JS_URL, interval=CLEAR_STORAGE_TYPE_INTERVAL)
+    pyautogui.press("enter")
+    time.sleep(RELOAD_WAIT_SECONDS)
+    return True
 
 
 def type_text(text: str) -> None:
