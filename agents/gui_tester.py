@@ -44,11 +44,11 @@ from agents.gui.detection import (
 from agents.gui.execution import (
     BrowserWindow,
     capture_screenshot,
-    clear_local_storage,
     click_at,
     close_window,
     enable_windows_dpi_awareness,
     open_browser_maximized,
+    open_new_tab,
     type_text,
 )
 from agents.gui.judgment import decide_next_action
@@ -65,10 +65,6 @@ MAX_GUI_STEPS = 8
 # it keep retrying the same wrong coordinates.
 CONSECUTIVE_INEFFECTIVE_LIMIT = 2
 ACTION_SETTLE_SECONDS = 0.5
-# Lets launch_app()'s own Ctrl+R reload settle before clear_local_storage()
-# drives the address bar again -- back-to-back keystroke sequences on a
-# still-loading page can race and silently no-op.
-LOCAL_STORAGE_CLEAR_SETTLE_SECONDS = 1.0
 # Margin (px) added around an action's target box when diffing just that
 # region -- just enough to catch visual feedback that overflows the box
 # slightly (typed text, a checkbox's strikethrough label), without pulling
@@ -81,6 +77,7 @@ class OpenAIGUITesterAgent(GUITesterAgent):
         self.config = config or PipelineConfig()
         self.client = client or OpenAI(api_key=self.config.openai_api_key)
         self._last_window: BrowserWindow | None = None
+        self._launch_count = 0
         enable_windows_dpi_awareness()
 
     def cleanup(self) -> None:
@@ -175,6 +172,24 @@ class OpenAIGUITesterAgent(GUITesterAgent):
             return self._launch_electron_app(launch_config)
         raise ValueError(f"Unknown launch_type: {launch_config.launch_type!r}")
 
+    def _next_port(self, base_port: int) -> int:
+        """A different port per launch (one per Phase, plus GUI-retries)
+        means a different browser *origin* each time -- which means a
+        naturally empty localStorage every launch, with zero explicit
+        clearing needed. app.js never references its own port (pure
+        localStorage, no fetch/WebSocket calls), so which port it's served
+        on doesn't affect app behavior at all, only which origin the
+        browser considers it to be.
+
+        This replaces the old approach (typing a `javascript:
+        localStorage.clear()` URL into the address bar), which needed
+        toggling fullscreen off and back on to work reliably -- a visible,
+        unwanted flicker. No clearing step at all means no flicker.
+        """
+        port = base_port + self._launch_count
+        self._launch_count += 1
+        return port
+
     def _launch_static_web_server(
         self, launch_config: LaunchConfig
     ) -> tuple[LocalStaticServer, BrowserWindow]:
@@ -184,15 +199,32 @@ class OpenAIGUITesterAgent(GUITesterAgent):
         clean subprocess teardown, UTF-8 env) rather than exec'ing
         launch_config.launch_command verbatim -- that string is LLM
         output, and shelling it out directly would be both fragile and a
-        command-injection risk. We do honor the *port* it specified (via
-        entry_url), so the Developer's stated intent still drives what
-        actually runs.
+        command-injection risk. The Developer's stated port is only the
+        *base* -- see _next_port() for why each launch actually gets a
+        different one.
         """
-        port = urlparse(launch_config.entry_url).port or DEFAULT_PORT
+        base_port = urlparse(launch_config.entry_url).port or DEFAULT_PORT
+        port = self._next_port(base_port)
         server = LocalStaticServer(self.config.target_app_dir, port=port)
         server.start()
         logger.info("GUI: launch_type=static_web_server serving at %s", server.url)
-        window = open_browser_maximized(launch_config.entry_url or server.url)
+
+        entry_path = urlparse(launch_config.entry_url).path or "/index.html"
+        url = f"http://127.0.0.1:{port}{entry_path}"
+        # First launch of the whole run: open a genuinely new, separate
+        # window (not Streamlit's). Every launch after that (next Phase,
+        # or a GUI-retry within a Phase): add a new tab to that same
+        # window instead of opening another one -- tabs piling up in the
+        # one window is fine, cleanup() closes the whole window (and every
+        # tab in it) at the very end.
+        window = None
+        if self._last_window is not None:
+            if open_new_tab(self._last_window, url):
+                window = self._last_window
+            else:
+                logger.info("GUI: previous window no longer exists, opening a new one")
+        if window is None:
+            window = open_browser_maximized(url)
         return server, window
 
     def _launch_native_exe(
@@ -230,20 +262,10 @@ class OpenAIGUITesterAgent(GUITesterAgent):
 
         server, window = self.launch_app(phase.launch_config)
         try:
-            # launch_app() (open_browser_maximized) just did its own Ctrl+R
-            # reload as its last step -- give that a moment to actually
-            # settle before clear_local_storage() drives the address bar
-            # again, or the two keystroke sequences can race.
-            time.sleep(LOCAL_STORAGE_CLEAR_SETTLE_SECONDS)
-
-            # Fresh start each Phase -- otherwise a previous Phase's (or a
-            # human's manual testing) leftover localStorage data would
-            # still be sitting there when this Phase's criteria get judged.
-            if not clear_local_storage(window):
-                logger.warning(
-                    "GUI: phase=%s localStorage clear failed -- continuing anyway", phase.id
-                )
-
+            # Fresh start each Phase -- launch_app() serves this launch on
+            # its own port (see _next_port()), a different browser origin
+            # each time, so there's no previous Phase's (or a human's
+            # manual testing) leftover localStorage to worry about here.
             current_image = capture_screenshot(window)
 
             for step in range(1, max_steps + 1):

@@ -1,196 +1,145 @@
 (function () {
   'use strict';
 
-  var STORAGE_KEY = 'todo-items';
+  var STORAGE_KEY = 'todo-list-items';
   var form = document.getElementById('todo-form');
   var input = document.getElementById('todo-input');
   var list = document.getElementById('todo-list');
-  var emptyMessage = document.getElementById('empty-message');
+  var warning = document.getElementById('input-warning');
+  var warningTimer;
+  var todos = loadTodos();
+  var nextId = Date.now();
 
-  function getTodos() {
+  function loadTodos() {
+    var savedTodos;
+    var parsedTodos;
+
     try {
-      var savedTodos = localStorage.getItem(STORAGE_KEY);
-      var todos = savedTodos ? JSON.parse(savedTodos) : [];
-      return Array.isArray(todos) ? todos : [];
+      savedTodos = window.localStorage.getItem(STORAGE_KEY);
+      parsedTodos = savedTodos ? JSON.parse(savedTodos) : [];
     } catch (error) {
-      console.warn('Todo 목록을 불러오지 못했습니다.', error);
       return [];
     }
+
+    if (!Array.isArray(parsedTodos)) {
+      return [];
+    }
+
+    return parsedTodos.filter(function (todo) {
+      return todo && typeof todo.text === 'string';
+    }).map(function (todo) {
+      return {
+        id: typeof todo.id === 'string' ? todo.id : String(nextId++),
+        text: todo.text,
+        completed: todo.completed === true,
+        deleted: todo.deleted === true
+      };
+    });
   }
 
-  function saveTodos(todos) {
+  function saveTodos() {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(todos));
-      return true;
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(todos));
     } catch (error) {
       console.warn('Todo 목록을 저장하지 못했습니다.', error);
-      return false;
     }
   }
 
-  function getTodoText(todo) {
-    if (typeof todo === 'string') {
-      return todo;
-    }
-
-    return todo && typeof todo.text === 'string' ? todo.text : '';
+  function showWarning() {
+    window.clearTimeout(warningTimer);
+    warning.hidden = false;
+    warningTimer = window.setTimeout(function () {
+      warning.hidden = true;
+    }, 2000);
   }
 
-  function isTodoCompleted(todo) {
-    return Boolean(todo && typeof todo === 'object' && todo.completed);
+  function setCompleted(item, checkbox, completed) {
+    checkbox.checked = completed;
+    item.classList.toggle('is-completed', completed);
   }
 
-  function setTodoCompletion(index, completed) {
-    var todos = getTodos();
-    var existingTodo;
+  function createTodoItem(todo) {
+    var item = document.createElement('li');
+    var checkbox = document.createElement('input');
+    var content = document.createElement('span');
+    var deleteButton = document.createElement('button');
 
-    if (!Number.isInteger(index) || index < 0 || index >= todos.length) {
-      return;
-    }
+    item.className = 'todo-item';
 
-    existingTodo = todos[index];
-    todos[index] = {
-      text: getTodoText(existingTodo),
-      completed: completed
-    };
-
-    saveTodos(todos);
-    renderTodos();
-  }
-
-  function deleteTodo(index) {
-    var todos = getTodos();
-
-    if (!Number.isInteger(index) || index < 0 || index >= todos.length) {
-      return;
-    }
-
-    todos.splice(index, 1);
-    saveTodos(todos);
-    renderTodos();
-  }
-
-  function renderTodos() {
-    var todos = getTodos();
-
-    list.innerHTML = '';
-
-    todos.forEach(function (todo, index) {
-      var item = document.createElement('li');
-      var checkbox = document.createElement('input');
-      var label = document.createElement('label');
-      var toggleButton = document.createElement('button');
-      var deleteButton = document.createElement('button');
-      var todoText = getTodoText(todo);
-      var checkboxId = 'todo-check-' + index;
-      var completed = isTodoCompleted(todo);
-
-      item.className = 'todo-item' + (completed ? ' completed' : '');
-      item.setAttribute('data-index', String(index));
-
-      checkbox.className = 'todo-item-checkbox';
-      checkbox.type = 'checkbox';
-      checkbox.id = checkboxId;
-      checkbox.checked = completed;
-      checkbox.setAttribute('data-index', String(index));
-      checkbox.setAttribute('aria-label', todoText + ' 완료 여부');
-
-      label.className = 'todo-item-text';
-      label.htmlFor = checkboxId;
-      label.textContent = todoText;
-
-      toggleButton.className = 'todo-toggle-button';
-      toggleButton.type = 'button';
-      toggleButton.textContent = completed ? '완료 취소' : '완료';
-      toggleButton.setAttribute('data-index', String(index));
-      toggleButton.setAttribute('aria-label', todoText + (completed ? ' 완료 취소' : ' 완료'));
-
-      deleteButton.className = 'todo-delete-button';
-      deleteButton.type = 'button';
-      deleteButton.textContent = '삭제';
-      deleteButton.setAttribute('data-index', String(index));
-      deleteButton.setAttribute('aria-label', todoText + ' 삭제');
-
-      item.appendChild(checkbox);
-      item.appendChild(label);
-      item.appendChild(toggleButton);
-      item.appendChild(deleteButton);
-      list.appendChild(item);
+    checkbox.className = 'todo-checkbox';
+    checkbox.type = 'checkbox';
+    checkbox.setAttribute('aria-label', '완료 표시');
+    checkbox.addEventListener('click', function (event) {
+      event.stopPropagation();
+    });
+    checkbox.addEventListener('change', function () {
+      todo.completed = checkbox.checked;
+      setCompleted(item, checkbox, todo.completed);
+      saveTodos();
     });
 
-    emptyMessage.hidden = todos.length > 0;
+    content.className = 'todo-text';
+    content.textContent = todo.text;
+
+    deleteButton.className = 'delete-button';
+    deleteButton.type = 'button';
+    deleteButton.textContent = '삭제';
+    deleteButton.setAttribute('aria-label', todo.text + ' 삭제');
+    deleteButton.addEventListener('click', function (event) {
+      event.stopPropagation();
+      todo.deleted = true;
+      item.remove();
+      saveTodos();
+    });
+
+    item.addEventListener('click', function () {
+      todo.completed = !checkbox.checked;
+      setCompleted(item, checkbox, todo.completed);
+      saveTodos();
+    });
+
+    item.appendChild(checkbox);
+    item.appendChild(content);
+    item.appendChild(deleteButton);
+    setCompleted(item, checkbox, todo.completed);
+    return item;
+  }
+
+  function restoreTodos() {
+    todos.forEach(function (todo) {
+      if (!todo.deleted) {
+        list.appendChild(createTodoItem(todo));
+      }
+    });
   }
 
   form.addEventListener('submit', function (event) {
-    var newTodo = input.value.trim();
-    var todos;
+    var text;
+    var todo;
 
     event.preventDefault();
+    text = input.value.trim();
 
-    if (!newTodo) {
+    if (!text) {
+      showWarning();
       input.focus();
       return;
     }
 
-    todos = getTodos();
-    todos.push({
-      text: newTodo,
-      completed: false
-    });
-    saveTodos(todos);
-    renderTodos();
+    todo = {
+      id: String(nextId++),
+      text: text,
+      completed: false,
+      deleted: false
+    };
+    todos.push(todo);
+    list.appendChild(createTodoItem(todo));
+    saveTodos();
     input.value = '';
+    warning.hidden = true;
+    window.clearTimeout(warningTimer);
     input.focus();
   });
 
-  list.addEventListener('change', function (event) {
-    var checkbox = event.target;
-    var index;
-
-    if (!checkbox.matches('.todo-item-checkbox')) {
-      return;
-    }
-
-    index = Number(checkbox.getAttribute('data-index'));
-    setTodoCompletion(index, checkbox.checked);
-  });
-
-  list.addEventListener('click', function (event) {
-    var target = event.target;
-    var index;
-    var todos;
-
-    if (target.matches('.todo-delete-button')) {
-      index = Number(target.getAttribute('data-index'));
-      deleteTodo(index);
-      return;
-    }
-
-    if (target.matches('.todo-toggle-button')) {
-      index = Number(target.getAttribute('data-index'));
-      todos = getTodos();
-
-      if (!Number.isInteger(index) || index < 0 || index >= todos.length) {
-        return;
-      }
-
-      setTodoCompletion(index, !isTodoCompleted(todos[index]));
-      return;
-    }
-
-    if (!target.matches('.todo-item')) {
-      return;
-    }
-
-    index = Number(target.getAttribute('data-index'));
-    todos = getTodos();
-
-    if (!Number.isInteger(index) || index < 0 || index >= todos.length) {
-      return;
-    }
-
-    setTodoCompletion(index, !isTodoCompleted(todos[index]));
-  });
-
-  renderTodos();
+  restoreTodos();
 }());

@@ -13,8 +13,11 @@ from __future__ import annotations
 
 import ctypes
 import logging
+import re
+import subprocess
 import time
 import webbrowser
+import winreg
 from dataclasses import dataclass
 
 import pyautogui
@@ -88,6 +91,65 @@ def _wait_for_new_window(existing_handles: set[int]):
     return None
 
 
+def _prog_id_command(prog_id: str) -> str | None:
+    try:
+        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, rf"{prog_id}\shell\open\command") as key:
+            command, _ = winreg.QueryValueEx(key, None)
+            return command
+    except OSError:
+        return None
+
+
+def _default_browser_exe() -> str | None:
+    """Resolve a browser executable path from the registry, so it can be
+    launched directly with --new-window (see _open_new_window) instead of
+    going through webbrowser.open(), which only *hints* at a new window --
+    Chromium browsers often ignore that hint and add a tab to whatever
+    window is already open instead. That matters here because if the
+    caller's own dashboard is *also* a browser tab (e.g. a Streamlit UI
+    open in the same browser), a reused window means closing "the app
+    window" after verification closes the dashboard's tab/window too.
+
+    Prefers Chrome (ChromeHTML's ProgId) over whatever's set as the OS
+    default: this project's own dashboard is commonly run in Chrome, and
+    popping a different browser (e.g. Edge) for the target app, while
+    functionally fine, is a jarring mismatch for no benefit. Falls back to
+    the actual OS-registered default if Chrome isn't installed.
+    """
+    command = _prog_id_command("ChromeHTML")
+    if command is None:
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice",
+            ) as key:
+                prog_id, _ = winreg.QueryValueEx(key, "ProgId")
+            command = _prog_id_command(prog_id)
+        except OSError:
+            return None
+    if command is None:
+        return None
+
+    match = re.match(r'"([^"]+)"', command)
+    return match.group(1) if match else command.split()[0]
+
+
+def _open_new_window(url: str) -> bool:
+    """Launch the default browser directly with --new-window (a real
+    Chromium/Firefox flag), guaranteeing a separate top-level window rather
+    than hoping webbrowser.open() produces one. Returns False (falls back
+    to webbrowser.open()) if the browser couldn't be resolved or launched."""
+    exe_path = _default_browser_exe()
+    if exe_path is None:
+        return False
+    try:
+        subprocess.Popen([exe_path, "--new-window", url])
+        return True
+    except OSError as exc:
+        logger.warning("GUI: could not launch %s directly (%s)", exe_path, exc)
+        return False
+
+
 def open_browser_maximized(url: str) -> BrowserWindow:
     """Open `url` in the system default browser, bring it to the
     foreground, maximize it, and try to drop into fullscreen (F11) so its
@@ -100,7 +162,8 @@ def open_browser_maximized(url: str) -> BrowserWindow:
     that, especially with other windows already open.
     """
     existing_handles = _window_handles()
-    webbrowser.open(url, new=1)
+    if not _open_new_window(url):
+        webbrowser.open(url, new=1)
     time.sleep(BROWSER_OPEN_WAIT_SECONDS)
 
     window = _wait_for_new_window(existing_handles)
@@ -159,9 +222,69 @@ def open_browser_maximized(url: str) -> BrowserWindow:
     )
 
 
+def open_new_tab(window: BrowserWindow, url: str) -> bool:
+    """Reuse an already-open window by opening `url` in a new tab of it,
+    instead of opening a whole new window. Callers that launch the app
+    repeatedly (once per Phase, or per GUI-retry within a Phase) should
+    use this after the first open_browser_maximized() call -- otherwise
+    every call spawns another separate top-level window (guaranteed
+    distinct since open_browser_maximized() forces --new-window) and none
+    of the earlier ones ever get closed until the whole pipeline run ends,
+    piling up open windows. Tabs piling up in the *one* window is fine --
+    close_window() at the end takes all of them with it.
+
+    Launches the browser executable directly on `url` (no --new-window),
+    the same way open_browser_maximized() launches the *first* one --
+    Chrome's single-instance behavior routes a plain `chrome.exe <url>`
+    call to a new tab in the existing window rather than a new window.
+    Deliberately does *not* use keystrokes (Ctrl+T/Ctrl+L + typing) the
+    way an earlier version of this function did: confirmed by direct
+    testing that simulating Ctrl+T while the window is fullscreen doesn't
+    reliably focus the new tab's address bar (the typed URL went nowhere,
+    leaving Chrome's New Tab Page instead of navigating) unless fullscreen
+    was toggled off and back on for the keystrokes -- which is exactly the
+    visible flicker this avoids by not using keystrokes to navigate at
+    all. This mirrors how the *original* open_browser_maximized() (via
+    webbrowser.open()) always worked: no keystroke simulation, no
+    fullscreen side effects.
+
+    Returns False (caller should fall back to open_browser_maximized()) if
+    the window no longer exists -- e.g. the user closed it by hand.
+    """
+    if _find_live_window(window) is None:
+        return False
+
+    exe_path = _default_browser_exe()
+    if exe_path is None:
+        return False
+    try:
+        subprocess.Popen([exe_path, url])
+    except OSError as exc:
+        logger.warning("GUI: could not open new tab via %s (%s)", exe_path, exc)
+        return False
+    time.sleep(RELOAD_WAIT_SECONDS)
+    return True
+
+
+ACTIVATE_SETTLE_SECONDS = 0.2
+
+
 def _activate(window) -> None:
     try:
+        # Windows can silently *refuse* SetForegroundWindow() (which
+        # pygetwindow's .activate() wraps) when it's requested by a
+        # process/thread not tied to the user's most recent input --
+        # normally rare for a foreground CLI script, but now a real risk
+        # since the pipeline can run from a background thread (the
+        # Streamlit dashboard). AllowSetForegroundWindow(ASFW_ANY) grants
+        # blanket permission for the *next* such request to actually
+        # succeed instead of being silently dropped. Confirmed as the
+        # likely cause of a real bug: Ctrl+L (meant for the address bar)
+        # landing on the page's own focused input instead, because the
+        # window activation never really took effect.
+        ctypes.windll.user32.AllowSetForegroundWindow(-1)  # ASFW_ANY
         window.activate()
+        time.sleep(ACTIVATE_SETTLE_SECONDS)
     except Exception as exc:
         logger.warning("GUI: could not activate browser window (%s)", exc)
 
@@ -245,33 +368,72 @@ ADDRESS_BAR_WAIT_SECONDS = 0.3
 CLEAR_STORAGE_TYPE_INTERVAL = 0.01
 
 
+def _exit_fullscreen_if_needed(live_window) -> bool:
+    if not _is_fullscreen(live_window):
+        return False
+    _activate(live_window)
+    pyautogui.press("f11")
+    time.sleep(FULLSCREEN_WAIT_SECONDS)
+    return True
+
+
+def _restore_fullscreen(window: BrowserWindow) -> None:
+    live_window = _find_live_window(window)
+    if live_window is None:
+        return
+    _activate(live_window)
+    pyautogui.press("f11")
+    time.sleep(FULLSCREEN_WAIT_SECONDS)
+
+
+def _type_into_address_bar(window: BrowserWindow, text: str) -> bool:
+    """Type `text` into the address bar (Ctrl+L) and press Enter.
+
+    Confirmed by direct testing: Ctrl+L does *not* reliably reach Chrome's
+    address bar while the window is truly fullscreen (F11) and a page
+    element (e.g. an input the previous step typed into) already has
+    keyboard focus -- the keystrokes go to that page element instead,
+    typing `text` into it and submitting whatever form it's in. Works
+    every time once out of fullscreen. So: temporarily exit fullscreen for
+    the moment of the keystrokes, then restore it -- more reliable than
+    trying to blur the page's focus some other way (Escape didn't help).
+
+    Best-effort: returns False (never raises) if the window can't be
+    found.
+    """
+    live_window = _find_live_window(window)
+    if live_window is None:
+        return False
+
+    was_fullscreen = _exit_fullscreen_if_needed(live_window)
+    _activate(live_window)
+    pyautogui.hotkey("ctrl", "l")
+    time.sleep(ADDRESS_BAR_WAIT_SECONDS)
+    pyautogui.typewrite(text, interval=CLEAR_STORAGE_TYPE_INTERVAL)
+    pyautogui.press("enter")
+    time.sleep(RELOAD_WAIT_SECONDS)
+    if was_fullscreen:
+        _restore_fullscreen(window)
+    return True
+
+
 def clear_local_storage(window: BrowserWindow) -> bool:
     """Clear the page's localStorage and reload, so no data from a
     previous Phase's manual/automated testing leaks into the next one.
 
-    Done via a `javascript:` URL typed into the address bar (Ctrl+L),
-    since this execution layer is OS-level only (PyAutoGUI) -- there's no
-    DOM/browser API here to call localStorage.clear() directly. It must be
-    *typed* (pyautogui.typewrite), not pasted: Chrome strips a pasted
-    "javascript:" prefix as an anti-self-XSS measure, but doesn't block
-    typed keystrokes. Ctrl+L still reaches the address bar even in F11
-    fullscreen (Chrome/Edge show a temporary overlay for it).
+    Done via a `javascript:` URL typed into the address bar, since this
+    execution layer is OS-level only (PyAutoGUI) -- there's no DOM/browser
+    API here to call localStorage.clear() directly. It must be *typed*
+    (pyautogui.typewrite), not pasted: Chrome strips a pasted "javascript:"
+    prefix as an anti-self-XSS measure, but doesn't block typed keystrokes.
 
     Best-effort: returns False (never raises) if the window can't be
     found, so callers can log a warning and continue rather than fail the
     whole verification run over this.
     """
-    live_window = _find_live_window(window)
-    if live_window is None:
+    if not _type_into_address_bar(window, CLEAR_STORAGE_JS_URL):
         logger.warning("GUI: could not find browser window to clear localStorage")
         return False
-
-    _activate(live_window)
-    pyautogui.hotkey("ctrl", "l")
-    time.sleep(ADDRESS_BAR_WAIT_SECONDS)
-    pyautogui.typewrite(CLEAR_STORAGE_JS_URL, interval=CLEAR_STORAGE_TYPE_INTERVAL)
-    pyautogui.press("enter")
-    time.sleep(RELOAD_WAIT_SECONDS)
     return True
 
 
