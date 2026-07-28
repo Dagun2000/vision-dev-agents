@@ -6,8 +6,11 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
+from orchestrator.encoding import ensure_utf8_stdio
+
 
 def setup_logging(logs_dir: Path, level: int = logging.INFO) -> logging.Logger:
+    ensure_utf8_stdio()
     logs_dir.mkdir(parents=True, exist_ok=True)
     log_file = logs_dir / f"pipeline_{datetime.now():%Y%m%d_%H%M%S}.log"
 

@@ -1,16 +1,287 @@
-"""Stub implementation of the Developer agent.
+"""Developer agent implementation.
 
-TODO (next step): call the LLM to write/edit files under target-app/,
-run an embedded linter/AST checker to self-correct syntax issues, and
-start a local static server to serve the app for GUI verification.
+Scope of this step: read state/plan.json, (re)generate the three static
+app files on top of whatever already exists in target-app/ (accumulating
+each Phase's changes on the previous one's), self-lint app.js, retry with
+lint feedback fed back into the model, and write the resulting Phase
+status ("dev_done" / "lint_failed") back to plan.json.
+
+Semantic code review and GUI verification are out of scope here -- that's
+the Reviewer / GUI Tester agents' job in a later step.
 """
 
 from __future__ import annotations
 
+import json
+import logging
+import shutil
+import subprocess
+from pathlib import Path
+
+from openai import OpenAI
+
 from agents.base import DeveloperAgent
-from agents.models import DevResult, Phase
+from agents.models import DevResult, Phase, PhaseStatus
+from agents.schemas import DevOutputSchema
+from orchestrator.config import ROOT_DIR, PipelineConfig
+from orchestrator.proc import run_utf8
+
+logger = logging.getLogger("pipeline")
+
+MAX_JS_LINT_RETRIES = 3
+ESLINT_CONFIG = ROOT_DIR / "tools" / "eslint.config.js"
+APP_FILES = ("index.html", "style.css", "app.js")
+
+SYSTEM_PROMPT = """\
+당신은 멀티 에이전트 자동 개발 파이프라인의 개발자(Developer) 에이전트입니다.
+목표는 localStorage만 사용하는 순수 정적 프론트엔드 Todo 리스트 앱을
+index.html / style.css / app.js 세 파일로 점진적으로 완성하는 것입니다.
+
+규칙:
+- 서버, 빌드 도구, 외부 라이브러리(import/CDN 등) 없이 순수 HTML/CSS/
+  바닐라 JavaScript만 사용하세요.
+- 이번에 주어지는 "현재 파일 내용"은 이전 Phase까지 누적된 결과물입니다.
+  이번 Phase의 요구사항만큼만 이어서 추가/수정하고, 기존에 이미 동작하던
+  기능을 망가뜨리지 마세요.
+- 응답에는 세 파일의 "전체" 내용을 다시 작성해서 반환하세요 (diff가 아닙니다).
+  변경이 필요 없는 파일도 전체 내용을 그대로 반환하세요.
+- app.js는 브라우저에 <script>로 그대로 로드되는 스크립트입니다. 전역
+  window/document/localStorage/console만 사용할 수 있고, import/require,
+  module 문법은 금지합니다.
+- 이전 시도의 eslint 오류가 주어지면 그 오류를 반드시 고치세요.
+"""
 
 
-class StubDeveloperAgent(DeveloperAgent):
+class DeveloperLintError(RuntimeError):
+    """Raised when app.js still fails lint after MAX_JS_LINT_RETRIES attempts."""
+
+
+class OpenAIDeveloperAgent(DeveloperAgent):
+    def __init__(
+        self,
+        config: PipelineConfig | None = None,
+        client: OpenAI | None = None,
+    ) -> None:
+        self.config = config or PipelineConfig()
+        self.client = client or OpenAI(api_key=self.config.openai_api_key)
+
+    # ---- DeveloperAgent interface (used by the orchestrator loop) -----
+
     def implement(self, phase: Phase, feedback: str | None = None) -> DevResult:
-        raise NotImplementedError("StubDeveloperAgent.implement is not implemented yet")
+        current_files = self._read_current_files()
+        lint_feedback = feedback
+
+        for attempt in range(1, MAX_JS_LINT_RETRIES + 1):
+            logger.info(
+                "Developer: phase=%s attempt=%d/%d (model=%s)",
+                phase.id,
+                attempt,
+                MAX_JS_LINT_RETRIES,
+                self.config.developer_model,
+            )
+            generated = self._generate_files(phase, current_files, lint_feedback)
+            self._write_files(generated)
+
+            lint_ok, lint_message = self._lint_js(self.config.target_app_dir / "app.js")
+            if lint_ok:
+                logger.info("Developer: phase=%s lint passed -- %s", phase.id, lint_message)
+                return DevResult(
+                    phase_id=phase.id,
+                    summary=generated.summary,
+                    files_changed=list(APP_FILES),
+                )
+
+            logger.warning(
+                "Developer: phase=%s lint failed (attempt %d/%d) -- %s",
+                phase.id,
+                attempt,
+                MAX_JS_LINT_RETRIES,
+                lint_message,
+            )
+            lint_feedback = lint_message
+            current_files = {
+                "index.html": generated.index_html,
+                "style.css": generated.style_css,
+                "app.js": generated.app_js,
+            }
+
+        raise DeveloperLintError(
+            f"Phase {phase.id}: app.js failed lint after {MAX_JS_LINT_RETRIES} attempts"
+        )
+
+    # ---- plan.json-driven workflow (standalone / CLI entry point) -----
+
+    def develop_next_pending_phase(self) -> DevResult:
+        """Read state/plan.json, implement the first 'pending' Phase, and
+        write the resulting status ('dev_done' / 'lint_failed') back."""
+        plan_path = self.config.plan_file
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+
+        phase_dict = next(
+            (p for p in plan["phases"] if p["status"] == PhaseStatus.PENDING.value), None
+        )
+        if phase_dict is None:
+            raise ValueError(f"{plan_path} has no phase with status='pending'")
+
+        phase = Phase(
+            id=phase_dict["id"],
+            title=phase_dict["title"],
+            description=phase_dict["description"],
+            success_criteria=phase_dict["success_criteria"],
+            status=PhaseStatus.PENDING,
+        )
+
+        try:
+            dev_result = self.implement(phase)
+        except DeveloperLintError:
+            phase_dict["status"] = PhaseStatus.LINT_FAILED.value
+            plan_path.write_text(
+                json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            logger.error("Developer: phase=%s marked lint_failed in %s", phase.id, plan_path)
+            raise
+
+        phase_dict["status"] = PhaseStatus.DEV_DONE.value
+        plan_path.write_text(json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8")
+        logger.info("Developer: phase=%s marked dev_done in %s", phase.id, plan_path)
+        return dev_result
+
+    # ---- internals ------------------------------------------------------
+
+    def _read_current_files(self) -> dict[str, str]:
+        files: dict[str, str] = {}
+        for name in APP_FILES:
+            path = self.config.target_app_dir / name
+            files[name] = path.read_text(encoding="utf-8") if path.exists() else ""
+        return files
+
+    def _write_files(self, generated: DevOutputSchema) -> None:
+        self.config.target_app_dir.mkdir(parents=True, exist_ok=True)
+        (self.config.target_app_dir / "index.html").write_text(
+            generated.index_html, encoding="utf-8"
+        )
+        (self.config.target_app_dir / "style.css").write_text(
+            generated.style_css, encoding="utf-8"
+        )
+        (self.config.target_app_dir / "app.js").write_text(generated.app_js, encoding="utf-8")
+
+    def _generate_files(
+        self,
+        phase: Phase,
+        current_files: dict[str, str],
+        lint_feedback: str | None,
+    ) -> DevOutputSchema:
+        user_message = self._build_user_message(phase, current_files, lint_feedback)
+        response = self.client.responses.parse(
+            model=self.config.developer_model,
+            input=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
+            text_format=DevOutputSchema,
+        )
+        result = response.output_parsed
+        if result is None:
+            raise ValueError("Developer LLM returned an unparseable response")
+        return result
+
+    def _build_user_message(
+        self,
+        phase: Phase,
+        current_files: dict[str, str],
+        lint_feedback: str | None,
+    ) -> str:
+        criteria = "\n".join(f"- {c}" for c in phase.success_criteria)
+        parts = [
+            f"## 이번 Phase\nid: {phase.id}\n제목: {phase.title}\n설명: {phase.description}",
+            f"\n## 성공 조건\n{criteria}",
+            "\n## 현재 파일 내용 (이전 Phase까지 누적된 결과물)",
+        ]
+        for name in APP_FILES:
+            content = current_files.get(name, "")
+            if content:
+                parts.append(f"\n### {name}\n```\n{content}\n```")
+            else:
+                parts.append(f"\n### {name}\n(아직 없음 -- 새로 작성)")
+        if lint_feedback:
+            parts.append(f"\n## 이전 시도의 lint 오류 (반드시 고칠 것)\n{lint_feedback}")
+        return "\n".join(parts)
+
+    def _lint_js(self, js_path: Path) -> tuple[bool, str]:
+        if not js_path.exists():
+            return False, f"{js_path} 파일이 생성되지 않았습니다"
+
+        eslint_result = self._run_eslint(js_path)
+        if eslint_result is not None:
+            return eslint_result
+
+        logger.warning("Developer: eslint unavailable, falling back to `node --check`")
+        return self._run_node_check(js_path)
+
+    def _run_eslint(self, js_path: Path) -> tuple[bool, str] | None:
+        """Run eslint (flat config, core rules only) as the JS linter.
+
+        Returns None (not a lint result) if eslint itself couldn't be run
+        -- e.g. not installed/cached for npx -- so the caller can fall
+        back to a plain syntax check instead.
+        """
+        # subprocess.run() without shell=True can't resolve Windows .cmd
+        # shims (npx.CMD) by bare name -- resolve the real path via PATH.
+        npx_path = shutil.which("npx")
+        if npx_path is None:
+            logger.warning("Developer: npx not found on PATH")
+            return None
+
+        try:
+            result = run_utf8(
+                [
+                    npx_path,
+                    "--no-install",
+                    "eslint",
+                    "--no-config-lookup",
+                    "--config",
+                    str(ESLINT_CONFIG),
+                    "--format",
+                    "json",
+                    str(js_path),
+                ],
+                cwd=str(ROOT_DIR),
+                timeout=60,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            logger.warning("Developer: npx eslint invocation failed (%s)", exc)
+            return None
+
+        try:
+            report = json.loads(result.stdout)
+        except (json.JSONDecodeError, ValueError):
+            logger.warning(
+                "Developer: eslint did not return JSON (npx/eslint unavailable?), stderr=%s",
+                result.stderr.strip(),
+            )
+            return None
+
+        errors = [
+            f"{js_path.name}:{message['line']}:{message['column']} "
+            f"{message.get('ruleId') or 'error'}: {message['message']}"
+            for file_report in report
+            for message in file_report.get("messages", [])
+            if message.get("severity") == 2
+        ]
+        if errors:
+            return False, "\n".join(errors)
+        return True, "eslint: no errors"
+
+    def _run_node_check(self, js_path: Path) -> tuple[bool, str]:
+        node_path = shutil.which("node")
+        if node_path is None:
+            return False, "node를 찾을 수 없어 문법 검사를 수행하지 못했습니다"
+
+        try:
+            result = run_utf8([node_path, "--check", str(js_path)], cwd=str(ROOT_DIR), timeout=30)
+        except subprocess.TimeoutExpired:
+            return False, "node --check 실행이 시간 초과되었습니다"
+
+        if result.returncode == 0:
+            return True, "node --check: no syntax errors (eslint unavailable, syntax-only check)"
+        return False, (result.stderr.strip() or result.stdout.strip())

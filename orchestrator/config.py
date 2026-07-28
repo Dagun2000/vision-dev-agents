@@ -13,7 +13,7 @@ TARGET_APP_DIR = ROOT_DIR / "target-app"
 STATE_DIR = ROOT_DIR / "state"
 LOGS_DIR = ROOT_DIR / "logs"
 
-load_dotenv(ROOT_DIR / ".env")
+load_dotenv(ROOT_DIR / ".env", encoding="utf-8")
 
 
 @dataclass(frozen=True)

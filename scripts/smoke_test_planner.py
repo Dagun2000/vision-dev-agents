@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 
 from agents.planner import OpenAIPlannerAgent
+from orchestrator.encoding import ensure_utf8_stdio
 
 SAMPLE_REQUIREMENT = (
     "로컬 저장이 되는 Todo 리스트 앱을 만들고 싶어. "
@@ -20,6 +21,7 @@ SAMPLE_REQUIREMENT = (
 
 
 def main() -> None:
+    ensure_utf8_stdio()
     planner = OpenAIPlannerAgent()
     phases = planner.create_plan(SAMPLE_REQUIREMENT)
 

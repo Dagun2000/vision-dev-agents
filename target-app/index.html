@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="간단한 Todo 리스트 앱">
+  <title>Todo 리스트</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="todo-app" aria-labelledby="app-title">
+    <header class="todo-header">
+      <h1 id="app-title">Todo 리스트</h1>
+      <p>오늘 해야 할 일을 기록해 보세요.</p>
+    </header>
+
+    <form id="todo-form" class="todo-form">
+      <label class="sr-only" for="todo-input">할 일</label>
+      <input
+        id="todo-input"
+        name="todo"
+        type="text"
+        placeholder="새 할 일을 입력하세요"
+        autocomplete="off"
+      >
+      <button type="submit">추가</button>
+    </form>
+
+    <section class="todo-list-section" aria-labelledby="todo-list-title">
+      <h2 id="todo-list-title">할 일 목록</h2>
+      <ul id="todo-list" class="todo-list" aria-live="polite"></ul>
+      <p id="empty-message" class="empty-message">등록된 할 일이 없습니다.</p>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

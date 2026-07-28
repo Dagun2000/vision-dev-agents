@@ -25,3 +25,16 @@ class PlanPhaseSchema(BaseModel):
 
 class PlanSchema(BaseModel):
     phases: list[PlanPhaseSchema]
+
+
+class DevOutputSchema(BaseModel):
+    """Full contents of the three static app files for one Developer attempt.
+
+    The model always returns all three files in full (not a diff) so each
+    Phase can accumulate on top of the previous Phase's output.
+    """
+
+    index_html: str = Field(description="index.html 전체 내용")
+    style_css: str = Field(description="style.css 전체 내용")
+    app_js: str = Field(description="app.js 전체 내용 (바닐라 JS, module 금지)")
+    summary: str = Field(description="이번 Phase에서 구현/수정한 내용에 대한 한두 문장 요약")

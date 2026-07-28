@@ -1,14 +1,14 @@
 """Entry point: wires the four agents into the orchestrator.
 
-Planner is now backed by an LLM (agents/planner.py); Developer/Reviewer/
-GUI Tester are still stubs, so running this will raise NotImplementedError
-as soon as the Developer is asked to implement the first Phase -- that's
-expected until those agents are filled in.
+Planner and Developer are now backed by an LLM (agents/planner.py,
+agents/developer.py); Reviewer/GUI Tester are still stubs, so running this
+will raise NotImplementedError as soon as the Reviewer is asked to review
+the first Phase -- that's expected until those agents are filled in.
 """
 
 from __future__ import annotations
 
-from agents.developer import StubDeveloperAgent
+from agents.developer import OpenAIDeveloperAgent
 from agents.gui_tester import StubGUITesterAgent
 from agents.planner import OpenAIPlannerAgent
 from agents.reviewer import StubReviewerAgent
@@ -30,7 +30,7 @@ def main() -> None:
 
     orchestrator = Orchestrator(
         planner=OpenAIPlannerAgent(config=config),
-        developer=StubDeveloperAgent(),
+        developer=OpenAIDeveloperAgent(config=config),
         reviewer=StubReviewerAgent(),
         gui_tester=StubGUITesterAgent(),
         config=config,

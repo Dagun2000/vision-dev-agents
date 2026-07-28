@@ -14,6 +14,8 @@ from enum import Enum
 class PhaseStatus(str, Enum):
     PENDING = "pending"
     IN_PROGRESS = "in_progress"
+    DEV_DONE = "dev_done"
+    LINT_FAILED = "lint_failed"
     PASSED = "passed"
     FAILED = "failed"
     ESCALATED = "escalated"
