@@ -38,3 +38,14 @@ class DevOutputSchema(BaseModel):
     style_css: str = Field(description="style.css 전체 내용")
     app_js: str = Field(description="app.js 전체 내용 (바닐라 JS, module 금지)")
     summary: str = Field(description="이번 Phase에서 구현/수정한 내용에 대한 한두 문장 요약")
+
+
+class ReviewOutputSchema(BaseModel):
+    """Reviewer's semantic judgement of whether code satisfies success_criteria."""
+
+    approved: bool = Field(description="모든 success_criteria를 의미적으로 만족하면 true")
+    issues: list[str] = Field(
+        default_factory=list,
+        description="approved가 false일 때, 어떤 success_criteria가 왜 충족되지 않는지 "
+        "구체적으로 적은 목록. approved가 true면 빈 배열",
+    )

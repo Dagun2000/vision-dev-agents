@@ -67,7 +67,22 @@ class OpenAIDeveloperAgent(DeveloperAgent):
 
     # ---- DeveloperAgent interface (used by the orchestrator loop) -----
 
-    def implement(self, phase: Phase, feedback: str | None = None) -> DevResult:
+    def implement(
+        self,
+        phase: Phase,
+        feedback: str | None = None,
+        review_issues: list[str] | None = None,
+    ) -> DevResult:
+        """Implement (or revise) a Phase.
+
+        `feedback` is a free-form string used by the orchestrator's generic
+        retry loop (review/GUI issues joined into one message). `review_issues`
+        is the same kind of input but structured, used when the Reviewer
+        agent explicitly requests a rewrite -- kept separate from the
+        internal lint-retry feedback below so the model sees "reviewer
+        found these semantic problems" and "eslint found these syntax
+        problems" as distinct, clearly-labelled sections.
+        """
         current_files = self._read_current_files()
         lint_feedback = feedback
 
@@ -79,7 +94,7 @@ class OpenAIDeveloperAgent(DeveloperAgent):
                 MAX_JS_LINT_RETRIES,
                 self.config.developer_model,
             )
-            generated = self._generate_files(phase, current_files, lint_feedback)
+            generated = self._generate_files(phase, current_files, lint_feedback, review_issues)
             self._write_files(generated)
 
             lint_ok, lint_message = self._lint_js(self.config.target_app_dir / "app.js")
@@ -170,8 +185,9 @@ class OpenAIDeveloperAgent(DeveloperAgent):
         phase: Phase,
         current_files: dict[str, str],
         lint_feedback: str | None,
+        review_issues: list[str] | None = None,
     ) -> DevOutputSchema:
-        user_message = self._build_user_message(phase, current_files, lint_feedback)
+        user_message = self._build_user_message(phase, current_files, lint_feedback, review_issues)
         response = self.client.responses.parse(
             model=self.config.developer_model,
             input=[
@@ -190,6 +206,7 @@ class OpenAIDeveloperAgent(DeveloperAgent):
         phase: Phase,
         current_files: dict[str, str],
         lint_feedback: str | None,
+        review_issues: list[str] | None = None,
     ) -> str:
         criteria = "\n".join(f"- {c}" for c in phase.success_criteria)
         parts = [
@@ -203,6 +220,9 @@ class OpenAIDeveloperAgent(DeveloperAgent):
                 parts.append(f"\n### {name}\n```\n{content}\n```")
             else:
                 parts.append(f"\n### {name}\n(아직 없음 -- 새로 작성)")
+        if review_issues:
+            issues_text = "\n".join(f"- {issue}" for issue in review_issues)
+            parts.append(f"\n## 코드 리뷰어가 지적한 문제 (반드시 고칠 것)\n{issues_text}")
         if lint_feedback:
             parts.append(f"\n## 이전 시도의 lint 오류 (반드시 고칠 것)\n{lint_feedback}")
         return "\n".join(parts)

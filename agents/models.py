@@ -16,6 +16,8 @@ class PhaseStatus(str, Enum):
     IN_PROGRESS = "in_progress"
     DEV_DONE = "dev_done"
     LINT_FAILED = "lint_failed"
+    REVIEW_DONE = "review_done"
+    REVIEW_FAILED = "review_failed"
     PASSED = "passed"
     FAILED = "failed"
     ESCALATED = "escalated"

@@ -7,10 +7,10 @@
 
 자세한 설계 배경은 [`멀티에이전트_자동개발시스템_기획서_v2.md`](./멀티에이전트_자동개발시스템_기획서_v2.md)를 참고하세요.
 
-> **현재 단계**: Planner(`agents/planner.py`)와 Developer(`agents/developer.py`)는
-> 실제 LLM 로직으로 구현되어 있습니다. Reviewer/GUI Tester는 아직
-> `Stub*Agent`로 남아 있고 `NotImplementedError`를 발생시킵니다. 다음 단계에서
-> 하나씩 채웁니다.
+> **현재 단계**: Planner(`agents/planner.py`), Developer(`agents/developer.py`),
+> Reviewer(`agents/reviewer.py`)는 실제 LLM 로직으로 구현되어 있습니다.
+> GUI Tester는 아직 `StubGUITesterAgent`로 남아 있고 `NotImplementedError`를
+> 발생시킵니다. 다음 단계에서 채웁니다.
 
 ## 폴더 구조
 
@@ -22,7 +22,7 @@
 │   ├── schemas.py               # LLM 구조화 출력(JSON Schema) Pydantic 모델
 │   ├── planner.py                # OpenAIPlannerAgent -- create_plan 구현, replan/에스컬레이션/보고서는 스텁
 │   ├── developer.py               # OpenAIDeveloperAgent -- 파일 생성 + eslint 자체 검증 구현
-│   ├── reviewer.py                 # StubReviewerAgent
+│   ├── reviewer.py                 # OpenAIReviewerAgent -- 성공 조건 대비 의미적 리뷰 + 재작성 요청 루프
 │   └── gui_tester.py                # StubGUITesterAgent
 ├── orchestrator/             # 파이프라인 루프 제어
 │   ├── config.py                # .env 로드 및 재시도 상한 등 설정
@@ -33,7 +33,8 @@
 │   └── pipeline.py                   # Orchestrator: 기획→개발↔리뷰↔GUI검증→재계획→에스컬레이션 루프
 ├── scripts/                  # 개별 에이전트를 수동으로 검증하기 위한 스모크 테스트 스크립트
 │   ├── smoke_test_planner.py
-│   └── smoke_test_developer.py
+│   ├── smoke_test_developer.py
+│   └── smoke_test_reviewer.py
 ├── tools/
 │   └── eslint.config.js       # Developer 에이전트의 app.js 자체 린트용 flat config (핵심 규칙만 사용)
 ├── target-app/                # 에이전트들이 생성한 Todo 앱 결과물 (index.html / style.css / app.js)
@@ -110,7 +111,7 @@ cp .env.example .env
 python main.py
 ```
 
-> Reviewer/GUI Tester는 아직 스텁이므로, `main.py` 실행 시 Reviewer 단계에서
+> GUI Tester는 아직 스텁이므로, `main.py` 실행 시 GUI 검증 단계에서
 > `NotImplementedError`가 발생하는 것이 정상입니다.
 
 개별 에이전트만 따로 검증하고 싶다면 `scripts/` 아래 스모크 테스트를 사용하세요.
@@ -118,12 +119,22 @@ python main.py
 ```bash
 uv run python scripts/smoke_test_planner.py     # 샘플 요구사항 -> state/plan.json 생성
 uv run python scripts/smoke_test_developer.py   # plan.json의 첫 pending Phase -> target-app/ 생성
+uv run python scripts/smoke_test_reviewer.py    # 의도적으로 깨뜨린/고친 코드 리뷰 + plan.json의 dev_done Phase 리뷰
 ```
+
+## Reviewer의 재작성 요청 루프
+
+`agents/reviewer.py`의 `review_next_dev_done_phase()`는 `state/plan.json`에서
+`dev_done` 상태인 첫 Phase를 찾아 `target-app/`의 코드만 보고(Developer의
+설명/의도는 전달하지 않음) success_criteria 충족 여부를 판단합니다.
+거부되면 `DeveloperAgent.implement(phase, review_issues=...)`를 직접 호출해
+재작성을 요청하고 다시 리뷰합니다 (최대 `MAX_REVIEW_RETRIES`=3회). 승인되면
+`review_done`, 3회 넘게 거부되면 `review_failed`로 `plan.json`을 갱신합니다.
 
 ## 다음 단계
 
 1. ~~`agents/planner.py`: 요구사항 분할 + 성공 조건 정의 로직 구현~~ (완료 -- create_plan만; replan/에스컬레이션/보고서는 예정)
 2. ~~`agents/developer.py`: 코드 생성 + 내장 Lint/AST 자체 수정 로직 구현~~ (완료)
-3. `agents/reviewer.py`: 성공 조건 대비 의미적 리뷰 로직 구현
+3. ~~`agents/reviewer.py`: 성공 조건 대비 의미적 리뷰 로직 구현~~ (완료)
 4. `agents/gui_tester.py`: Set-of-marks 탐지 + Vision 기반 액션 판단 + OS 레벨 입력 제어 구현
 5. `agents/planner.py`의 `replan` / `request_human_escalation` / `summarize_report` 구현
