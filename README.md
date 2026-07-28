@@ -35,6 +35,17 @@ anything but a PNG and the Phase's success criteria.
 Each agent implements an ABC in `agents/base.py`, so any of them can be
 swapped for a different model/strategy without touching the orchestrator.
 
+### Current status: web apps only
+
+`agents/models.py`'s `LaunchType` has three values (`STATIC_WEB_SERVER`,
+`NATIVE_EXE`, `ELECTRON_APP`), and the dashboard's app-type selector lists
+all three — but only `STATIC_WEB_SERVER` is actually implemented.
+`agents/gui_tester.py`'s `launch_app()` dispatcher raises
+`NotImplementedError` for the other two; they're placeholders for
+generalizing the GUI Tester's execution layer beyond static web apps later.
+Picking "Native EXE" or "Electron" in the dashboard just declines to start a
+run instead of silently doing nothing.
+
 ### How a run flows
 
 `orchestrator/plan_pipeline.py`'s `PlanDrivenPipeline` is the live
@@ -205,6 +216,17 @@ Developer가 직접 짠 Playwright/Selenium 스크립트로 자기 결과물을 
 
 각 에이전트는 `agents/base.py`의 추상 클래스를 구현하는 형태라, 다른
 모델/전략으로 교체해도 오케스트레이터를 건드릴 필요가 없습니다.
+
+### 현재 상태: 웹앱만 구현됨
+
+`agents/models.py`의 `LaunchType`에는 값이 3개(`STATIC_WEB_SERVER`,
+`NATIVE_EXE`, `ELECTRON_APP`) 있고 대시보드의 앱 타입 선택지도 셋 다
+보여주지만, 실제로 구현된 건 `STATIC_WEB_SERVER`뿐입니다.
+`agents/gui_tester.py`의 `launch_app()` 디스패처는 나머지 둘에 대해
+`NotImplementedError`를 던집니다 — 나중에 GUI Tester의 실행 계층을 정적
+웹앱 이외로 일반화하기 위한 자리만 잡아둔 상태입니다. 대시보드에서
+"Native EXE"나 "Electron"을 선택하면 조용히 아무 일도 안 하는 대신, 실행
+자체를 시작하지 않고 지원 안 한다고 안내합니다.
 
 ### 실행 흐름
 
