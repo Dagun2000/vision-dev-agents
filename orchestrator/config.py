@@ -34,3 +34,4 @@ class PipelineConfig:
     state_dir: Path = STATE_DIR
     logs_dir: Path = LOGS_DIR
     state_file: Path = STATE_DIR / "pipeline_state.json"
+    plan_file: Path = STATE_DIR / "plan.json"
