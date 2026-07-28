@@ -185,5 +185,14 @@ cython_debug/
 !/state/.gitkeep
 /logs/*.log
 !/logs/.gitkeep
+/logs/report_*.md
 /logs/screenshots/*.png
 !/logs/screenshots/.gitkeep
+
+# Generated app output -- overwritten by every pipeline run, not source
+/target-app/*
+!/target-app/.gitkeep
+
+# Manual backups of a target-app snapshot (see scripts/reset_local_storage.py
+# workflow) -- personal copies, not something to publish
+/target-app-backups/
