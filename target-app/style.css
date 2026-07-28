@@ -79,6 +79,11 @@ body {
   background: #1d4ed8;
 }
 
+.todo-form button:focus-visible {
+  outline: 3px solid rgba(37, 99, 235, 0.35);
+  outline-offset: 2px;
+}
+
 .todo-list-section {
   margin-top: 28px;
 }
@@ -100,6 +105,38 @@ body {
   border: 1px solid #e2e8f0;
   border-radius: 8px;
   background: #f8fafc;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.todo-item-label {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+}
+
+.todo-checkbox {
+  display: block;
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  flex: 0 0 20px;
+  accent-color: #2563eb;
+  cursor: pointer;
+}
+
+.todo-text {
+  overflow-wrap: anywhere;
+}
+
+.todo-item.is-completed {
+  border-color: #cbd5e1;
+  background: #f1f5f9;
+}
+
+.todo-item.is-completed .todo-text {
+  color: #64748b;
+  text-decoration: line-through;
 }
 
 .empty-message {

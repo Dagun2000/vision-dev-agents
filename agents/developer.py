@@ -21,7 +21,7 @@ from pathlib import Path
 from openai import OpenAI
 
 from agents.base import DeveloperAgent
-from agents.models import DevResult, Phase, PhaseStatus
+from agents.models import DevResult, LaunchConfig, Phase, PhaseStatus
 from agents.schemas import DevOutputSchema
 from orchestrator.config import ROOT_DIR, PipelineConfig
 from orchestrator.proc import run_utf8
@@ -49,6 +49,11 @@ index.html / style.css / app.js 세 파일로 점진적으로 완성하는 것�
   window/document/localStorage/console만 사용할 수 있고, import/require,
   module 문법은 금지합니다.
 - 이전 시도의 eslint 오류가 주어지면 그 오류를 반드시 고치세요.
+- launch_config는 이 앱을 어떻게 실행해서 검증할지에 대한 정보입니다.
+  launch_type은 항상 "static_web_server"로 고정하세요 (다른 값은 아직
+  지원되지 않습니다). launch_command는 "python -m http.server 8000"과
+  같은 형태로, entry_url은 "http://localhost:8000/index.html"과 같은
+  형태로 작성하세요.
 """
 
 
@@ -85,6 +90,7 @@ class OpenAIDeveloperAgent(DeveloperAgent):
         """
         current_files = self._read_current_files()
         lint_feedback = feedback
+        lint_errors_seen: list[str] = []
 
         for attempt in range(1, MAX_JS_LINT_RETRIES + 1):
             logger.info(
@@ -104,8 +110,16 @@ class OpenAIDeveloperAgent(DeveloperAgent):
                     phase_id=phase.id,
                     summary=generated.summary,
                     files_changed=list(APP_FILES),
+                    launch_config=LaunchConfig(
+                        launch_type=generated.launch_config.launch_type,
+                        launch_command=generated.launch_config.launch_command,
+                        entry_url=generated.launch_config.entry_url,
+                    ),
+                    lint_attempts=attempt,
+                    lint_errors=lint_errors_seen,
                 )
 
+            lint_errors_seen.append(lint_message)
             logger.warning(
                 "Developer: phase=%s lint failed (attempt %d/%d) -- %s",
                 phase.id,
@@ -157,6 +171,15 @@ class OpenAIDeveloperAgent(DeveloperAgent):
             raise
 
         phase_dict["status"] = PhaseStatus.DEV_DONE.value
+        if dev_result.launch_config is not None:
+            phase_dict["launch_config"] = {
+                "launch_type": dev_result.launch_config.launch_type.value,
+                "launch_command": dev_result.launch_config.launch_command,
+                "entry_url": dev_result.launch_config.entry_url,
+            }
+        phase_dict["lint_attempts"] = dev_result.lint_attempts
+        phase_dict["lint_errors"] = dev_result.lint_errors
+        phase_dict["dev_summary"] = dev_result.summary
         plan_path.write_text(json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8")
         logger.info("Developer: phase=%s marked dev_done in %s", phase.id, plan_path)
         return dev_result

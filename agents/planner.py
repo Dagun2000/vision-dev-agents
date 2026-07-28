@@ -10,11 +10,14 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import asdict
+from datetime import datetime
+from pathlib import Path
 
 from openai import OpenAI
 
 from agents.base import PlannerAgent
 from agents.models import Phase, PhaseStatus, ReplanContext
+from agents.report import PhaseReportRecord, render_report_markdown
 from agents.schemas import PlanSchema
 from orchestrator.config import PipelineConfig
 
@@ -55,6 +58,11 @@ class OpenAIPlannerAgent(PlannerAgent):
     ) -> None:
         self.config = config or PipelineConfig()
         self.client = client or OpenAI(api_key=self.config.openai_api_key)
+        self._report_requirement: str = ""
+        self._report_started_at: datetime | None = None
+        self._report_path: Path | None = None
+        self._report_phases: list[PhaseReportRecord] = []
+        self._report_final_files: dict[str, str] | None = None
 
     def create_plan(self, requirement: str) -> list[Phase]:
         logger.info("Planner: requesting plan from model=%s", self.config.planner_model)
@@ -101,3 +109,46 @@ class OpenAIPlannerAgent(PlannerAgent):
 
     def summarize_report(self, phases: list[Phase]) -> str:
         raise NotImplementedError("OpenAIPlannerAgent.summarize_report is not implemented yet")
+
+    # ---- incremental development report ---------------------------------
+    #
+    # Written to disk after every Phase (not just once at the end) so a
+    # crash mid-run still leaves a record of everything completed so far.
+
+    def start_report(self, requirement: str) -> Path:
+        self._report_requirement = requirement
+        self._report_started_at = datetime.now()
+        self._report_phases = []
+        self._report_final_files = None
+        self._report_path = (
+            self.config.logs_dir / f"report_{self._report_started_at:%Y%m%d_%H%M%S}.md"
+        )
+        self._write_report()
+        logger.info("Planner: report initialized at %s", self._report_path)
+        return self._report_path
+
+    def record_phase_report(self, record: PhaseReportRecord) -> None:
+        if self._report_started_at is None:
+            raise RuntimeError("start_report() must be called before record_phase_report()")
+        self._report_phases.append(record)
+        self._write_report()
+        logger.info("Planner: report updated (phase=%s) at %s", record.phase_id, self._report_path)
+
+    def finalize_report(self, final_files_summary: dict[str, str] | None = None) -> Path:
+        if self._report_path is None:
+            raise RuntimeError("start_report() must be called before finalize_report()")
+        self._report_final_files = final_files_summary
+        self._write_report()
+        print(f"리포트 생성 완료: {self._report_path}")
+        return self._report_path
+
+    def _write_report(self) -> None:
+        assert self._report_path is not None and self._report_started_at is not None
+        markdown = render_report_markdown(
+            requirement=self._report_requirement,
+            phases=self._report_phases,
+            started_at=self._report_started_at,
+            final_files_summary=self._report_final_files,
+        )
+        self._report_path.parent.mkdir(parents=True, exist_ok=True)
+        self._report_path.write_text(markdown, encoding="utf-8")

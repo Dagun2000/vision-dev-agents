@@ -11,6 +11,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from agents.models import LaunchType
+
 
 class PlanPhaseSchema(BaseModel):
     id: str = Field(description="Sequential id, e.g. 'phase-1', 'phase-2'")
@@ -27,6 +29,21 @@ class PlanSchema(BaseModel):
     phases: list[PlanPhaseSchema]
 
 
+class LaunchConfigSchema(BaseModel):
+    """How to launch target-app/ for GUI verification.
+
+    Only LaunchType.STATIC_WEB_SERVER is actually implemented (see
+    agents/gui_tester.py's launch_app()); the Developer agent's prompt
+    pins launch_type to that value for now regardless of the Phase.
+    """
+
+    launch_type: LaunchType = Field(
+        description="지금은 항상 static_web_server를 반환하세요 (다른 값은 아직 미구현)"
+    )
+    launch_command: str = Field(description="앱 실행 커맨드, 예: 'python -m http.server 8000'")
+    entry_url: str = Field(description="접속 URL, 예: 'http://localhost:8000/index.html'")
+
+
 class DevOutputSchema(BaseModel):
     """Full contents of the three static app files for one Developer attempt.
 
@@ -37,6 +54,7 @@ class DevOutputSchema(BaseModel):
     index_html: str = Field(description="index.html 전체 내용")
     style_css: str = Field(description="style.css 전체 내용")
     app_js: str = Field(description="app.js 전체 내용 (바닐라 JS, module 금지)")
+    launch_config: LaunchConfigSchema = Field(description="이 앱을 어떻게 실행해서 검증할지")
     summary: str = Field(description="이번 Phase에서 구현/수정한 내용에 대한 한두 문장 요약")
 
 
@@ -48,4 +66,61 @@ class ReviewOutputSchema(BaseModel):
         default_factory=list,
         description="approved가 false일 때, 어떤 success_criteria가 왜 충족되지 않는지 "
         "구체적으로 적은 목록. approved가 true면 빈 배열",
+    )
+
+
+class GUIActionSchema(BaseModel):
+    """One next-step decision from the Vision judgment call (agents/gui/judgment.py).
+
+    The model is shown only the labeled (Set-of-marks) screenshot -- no
+    separate OCR text list -- and must read the image itself to decide
+    what element N is and what to do next.
+    """
+
+    action: Literal["click", "type", "success", "failure"] = Field(
+        description="click: N번 요소를 클릭한다. type: N번 요소에 텍스트를 입력한다. "
+        "success: 화면 상태만으로 success_criteria가 이미 충족되었다고 판단됨. "
+        "failure: 더 진행해도 success_criteria를 충족시킬 수 없다고 판단됨."
+    )
+    target_element: int | None = Field(
+        default=None, description="action이 click 또는 type일 때, 대상 요소의 번호 (스크린샷의 빨간 배지 숫자)"
+    )
+    text: str | None = Field(default=None, description="action이 type일 때 입력할 텍스트")
+    criterion_failed: str | None = Field(
+        default=None,
+        description="action이 failure일 때, success_criteria 중 충족되지 않은 항목 (원문 그대로 또는 "
+        "가장 가까운 항목). action이 failure가 아니면 null",
+    )
+    reasoning: str = Field(
+        description="이 판단을 내린 이유를 화면에서 관찰한 내용을 근거로 한두 문장으로 서술"
+    )
+
+
+class GUIStepLogEntry(BaseModel):
+    """One step of the GUI Tester's action/observation trace."""
+
+    step: int
+    action: str = Field(description="이번 스텝에서 수행한 액션 (예: '3번 요소 클릭', '1번 입력창에 텍스트 입력')")
+    result: str = Field(description="액션 수행 후 관찰된 결과에 대한 짧은 서술")
+
+
+class GUITestOutputSchema(BaseModel):
+    """Final result of one GUI Tester verification run for a Phase."""
+
+    success: bool
+    criterion_failed: str | None = Field(
+        default=None,
+        description="success가 false일 때, success_criteria 중 충족되지 않은 항목. "
+        "success가 true면 null",
+    )
+    step_log: list[GUIStepLogEntry] = Field(default_factory=list)
+    symptom: str | None = Field(
+        default=None,
+        description="success가 false일 때, 화면에서 실제로 관찰된 증상을 "
+        "'무엇을 기대했는데 실제로는 어땠는지' 형태의 자연어로 서술. success가 true면 null",
+    )
+    screenshot_paths: list[str] = Field(
+        default_factory=list,
+        description="이 검증 시도 중 저장된 스텝별 라벨링 스크린샷 경로 (logs/screenshots/ 기준 상대 경로). "
+        "LLM이 채우는 필드가 아니라 verify_phase()가 내부적으로 채움",
     )

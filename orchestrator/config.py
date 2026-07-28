@@ -29,9 +29,20 @@ class PipelineConfig:
     max_dev_review_retries: int = int(os.getenv("MAX_DEV_REVIEW_RETRIES", "5"))
     max_gui_retries: int = int(os.getenv("MAX_GUI_RETRIES", "5"))
     max_replan_attempts: int = int(os.getenv("MAX_REPLAN_ATTEMPTS", "2"))
+    # Developer<->GUI Tester rewrite loop (orchestrator/plan_pipeline.py),
+    # tracked separately from the Developer<->Reviewer loop above via
+    # plan.json's per-phase gui_retry_count field.
+    max_gui_test_retries: int = int(os.getenv("MAX_GUI_TEST_RETRIES", "4"))
+
+    # Debug-only: skip Reviewer for one phase and inject a deliberate bug
+    # into the Developer's output before GUI verification, to demo the
+    # GUI-failure -> Developer-rewrite loop. See debug/bug_injector.py.
+    debug_inject_bug: bool = os.getenv("DEBUG_INJECT_BUG", "false").lower() == "true"
+    debug_inject_phase_id: str | None = os.getenv("DEBUG_INJECT_PHASE_ID") or None
 
     target_app_dir: Path = TARGET_APP_DIR
     state_dir: Path = STATE_DIR
     logs_dir: Path = LOGS_DIR
     state_file: Path = STATE_DIR / "pipeline_state.json"
     plan_file: Path = STATE_DIR / "plan.json"
+    screenshots_dir: Path = LOGS_DIR / "screenshots"

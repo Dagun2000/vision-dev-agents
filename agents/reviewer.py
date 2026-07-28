@@ -100,10 +100,10 @@ class OpenAIReviewerAgent(ReviewerAgent):
         )
 
         review_result: ReviewResult | None = None
+        rejected_issues: list[list[str]] = []
         for attempt in range(1, MAX_REVIEW_RETRIES + 1):
             current_files = self._read_current_files()
             result = self._review_files(phase, current_files)
-            review_result = ReviewResult(phase_id=phase.id, passed=result.approved, issues=result.issues)
 
             logger.info(
                 "Reviewer: phase=%s attempt=%d/%d approved=%s",
@@ -114,13 +114,30 @@ class OpenAIReviewerAgent(ReviewerAgent):
             )
 
             if result.approved:
+                review_result = ReviewResult(
+                    phase_id=phase.id,
+                    passed=True,
+                    issues=[],
+                    attempts=attempt,
+                    rejected_issues=rejected_issues,
+                )
                 phase_dict["status"] = PhaseStatus.REVIEW_DONE.value
+                phase_dict["review_retry_count"] = attempt - 1
+                phase_dict["review_rejected_issues"] = rejected_issues
                 plan_path.write_text(
                     json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8"
                 )
                 logger.info("Reviewer: phase=%s marked review_done in %s", phase.id, plan_path)
                 return review_result
 
+            rejected_issues.append(result.issues)
+            review_result = ReviewResult(
+                phase_id=phase.id,
+                passed=False,
+                issues=result.issues,
+                attempts=attempt,
+                rejected_issues=rejected_issues,
+            )
             logger.warning(
                 "Reviewer: phase=%s rejected (attempt %d/%d) -- %s",
                 phase.id,
@@ -134,6 +151,8 @@ class OpenAIReviewerAgent(ReviewerAgent):
                 self.developer.implement(phase, review_issues=result.issues)
 
         phase_dict["status"] = PhaseStatus.REVIEW_FAILED.value
+        phase_dict["review_retry_count"] = MAX_REVIEW_RETRIES
+        phase_dict["review_rejected_issues"] = rejected_issues
         plan_path.write_text(json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8")
         logger.error("Reviewer: phase=%s marked review_failed in %s", phase.id, plan_path)
         assert review_result is not None

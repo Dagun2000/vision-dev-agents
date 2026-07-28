@@ -9,7 +9,12 @@ from pathlib import Path
 from orchestrator.encoding import ensure_utf8_stdio
 
 
-def setup_logging(logs_dir: Path, level: int = logging.INFO) -> logging.Logger:
+def setup_logging(
+    logs_dir: Path, level: int = logging.INFO, console_level: int = logging.WARNING
+) -> logging.Logger:
+    """Console stays quiet (warnings/errors only, plus whatever the
+    pipeline explicitly print()s for phase start/finish) -- the full
+    step-by-step trace still goes to the file handler at `level`."""
     ensure_utf8_stdio()
     logs_dir.mkdir(parents=True, exist_ok=True)
     log_file = logs_dir / f"pipeline_{datetime.now():%Y%m%d_%H%M%S}.log"
@@ -21,10 +26,12 @@ def setup_logging(logs_dir: Path, level: int = logging.INFO) -> logging.Logger:
     formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
     console_handler = logging.StreamHandler()
+    console_handler.setLevel(console_level)
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
 
     file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setLevel(level)
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
 

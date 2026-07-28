@@ -185,3 +185,5 @@ cython_debug/
 !/state/.gitkeep
 /logs/*.log
 !/logs/.gitkeep
+/logs/screenshots/*.png
+!/logs/screenshots/.gitkeep

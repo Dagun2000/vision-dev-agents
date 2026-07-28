@@ -18,9 +18,36 @@ class PhaseStatus(str, Enum):
     LINT_FAILED = "lint_failed"
     REVIEW_DONE = "review_done"
     REVIEW_FAILED = "review_failed"
+    GUI_VERIFIED = "gui_verified"
+    GUI_TEST_FAILED = "gui_test_failed"
     PASSED = "passed"
     FAILED = "failed"
     ESCALATED = "escalated"
+
+
+class LaunchType(str, Enum):
+    """How the GUI Tester should launch target-app/ to verify it.
+
+    Only STATIC_WEB_SERVER is implemented right now (this project's target
+    is a static web app). NATIVE_EXE / ELECTRON_APP are placeholders for
+    generalizing the GUI Tester's execution layer to other app types later
+    -- see agents/gui_tester.py's launch_app() dispatcher.
+    """
+
+    STATIC_WEB_SERVER = "static_web_server"
+    NATIVE_EXE = "native_exe"
+    ELECTRON_APP = "electron_app"
+
+
+@dataclass
+class LaunchConfig:
+    """How to launch this Phase's app for GUI verification, as decided by
+    the Developer agent (agents/schemas.py's LaunchConfigSchema is the LLM
+    structured-output counterpart of this)."""
+
+    launch_type: LaunchType
+    launch_command: str
+    entry_url: str
 
 
 @dataclass
@@ -32,6 +59,7 @@ class Phase:
     description: str
     success_criteria: list[str]
     status: PhaseStatus = PhaseStatus.PENDING
+    launch_config: LaunchConfig | None = None
 
 
 @dataclass
@@ -41,6 +69,12 @@ class DevResult:
     phase_id: str
     summary: str
     files_changed: list[str] = field(default_factory=list)
+    launch_config: LaunchConfig | None = None
+    # How many self-lint attempts it took to reach this (successful) result,
+    # and the eslint/node --check messages from the failed attempts along
+    # the way -- used by the development report (agents/report.py).
+    lint_attempts: int = 1
+    lint_errors: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -50,6 +84,11 @@ class ReviewResult:
     phase_id: str
     passed: bool
     issues: list[str] = field(default_factory=list)
+    # How many review rounds it took to reach this result, and the issues
+    # list from each rejected round along the way -- used by the
+    # development report (agents/report.py).
+    attempts: int = 1
+    rejected_issues: list[list[str]] = field(default_factory=list)
 
 
 @dataclass
