@@ -8,6 +8,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from agents.models import LaunchType
+
 ROOT_DIR = Path(__file__).resolve().parent.parent
 TARGET_APP_DIR = ROOT_DIR / "target-app"
 STATE_DIR = ROOT_DIR / "state"
@@ -62,6 +64,15 @@ class PipelineConfig:
     debug_inject_phase_ids: frozenset[str] = frozenset(
         p.strip() for p in os.getenv("DEBUG_INJECT_PHASE_ID", "").split(",") if p.strip()
     )
+
+    # Which kind of app the Developer generates and the GUI Tester launches,
+    # for this run. Defaults to the original (and only fully-wired-up-by-
+    # default) behavior, static_web_server -- nothing changes for any
+    # existing caller that doesn't explicitly override this. Set per-run via
+    # dataclasses.replace(config, target_launch_type=...) (see dashboard.py),
+    # not via .env, since it's a per-conversation choice, not a deployment
+    # setting.
+    target_launch_type: LaunchType = LaunchType.STATIC_WEB_SERVER
 
     target_app_dir: Path = TARGET_APP_DIR
     state_dir: Path = STATE_DIR

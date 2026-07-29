@@ -14,6 +14,7 @@ from __future__ import annotations
 import ctypes
 import logging
 import re
+import shutil
 import subprocess
 import time
 import webbrowser
@@ -264,6 +265,66 @@ def open_new_tab(window: BrowserWindow, url: str) -> bool:
         return False
     time.sleep(RELOAD_WAIT_SECONDS)
     return True
+
+
+NATIVE_APP_OPEN_WAIT_SECONDS = 2.0
+
+
+def open_native_app_maximized(
+    command: list[str], cwd: str | None = None, env: dict[str, str] | None = None
+) -> BrowserWindow:
+    """Launch `command` as a subprocess (a native EXE or an Electron binary
+    invocation) and find/activate/maximize the window it opens.
+
+    Deliberately reuses the same window-diffing approach as
+    open_browser_maximized() (so it's just as robust to focus-stealing/slow
+    startup) but skips everything browser-specific -- no F11 fullscreen
+    toggle, no Ctrl+R reload, no address bar. Native apps and Electron
+    windows have none of that browser chrome to rely on, and Electron in
+    particular doesn't show an address bar by default at all.
+
+    Returns a BrowserWindow (the name is legacy from when this layer was
+    browser-only; the dataclass itself is just "a window's region + hwnd",
+    equally valid for any top-level window).
+    """
+    existing_handles = _window_handles()
+    # subprocess.Popen() without shell=True can't resolve Windows .cmd/.bat
+    # shims (npx, npm, yarn, ...) by bare name -- resolve the real path via
+    # PATH first, same fix as the Developer agent's eslint invocation.
+    resolved = shutil.which(command[0]) or command[0]
+    try:
+        subprocess.Popen([resolved, *command[1:]], cwd=cwd, env=env)
+    except OSError as exc:
+        logger.warning("GUI: could not launch native app %r (%s)", command, exc)
+        screen_width, screen_height = pyautogui.size()
+        return BrowserWindow(left=0, top=0, width=screen_width, height=screen_height)
+
+    time.sleep(NATIVE_APP_OPEN_WAIT_SECONDS)
+    window = _wait_for_new_window(existing_handles)
+    if window is None:
+        logger.warning("GUI: no newly-opened native app window detected, falling back to getActiveWindow()")
+        window = gw.getActiveWindow()
+
+    if window is None:
+        logger.warning("GUI: could not detect native app window, falling back to full screen")
+        screen_width, screen_height = pyautogui.size()
+        return BrowserWindow(left=0, top=0, width=screen_width, height=screen_height)
+
+    _activate(window)
+    try:
+        if not window.isMaximized:
+            window.maximize()
+        time.sleep(MAXIMIZE_WAIT_SECONDS)
+    except Exception as exc:
+        logger.warning("GUI: could not maximize native app window (%s)", exc)
+
+    return BrowserWindow(
+        left=window.left,
+        top=window.top,
+        width=window.width,
+        height=window.height,
+        hwnd=window._hWnd,
+    )
 
 
 ACTIVATE_SETTLE_SECONDS = 0.2

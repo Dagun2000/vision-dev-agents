@@ -32,23 +32,36 @@ class PlanSchema(BaseModel):
 class LaunchConfigSchema(BaseModel):
     """How to launch target-app/ for GUI verification.
 
-    Only LaunchType.STATIC_WEB_SERVER is actually implemented (see
-    agents/gui_tester.py's launch_app()); the Developer agent's prompt
-    pins launch_type to that value for now regardless of the Phase.
+    STATIC_WEB_SERVER and ELECTRON_APP are both implemented (see
+    agents/gui_tester.py's launch_app()) -- the Developer agent's prompt
+    fixes launch_type to whichever one this run actually targets
+    (PipelineConfig.target_launch_type), not something the model chooses
+    freely. Note: for both types, the GUI Tester constructs its own actual
+    launch command rather than exec'ing launch_command verbatim (LLM
+    output, unsafe/fragile to shell out directly) -- these two fields are
+    mostly documentation of intent at this point, kept for the report and
+    for a future launch_type where the literal command might matter more.
     """
 
     launch_type: LaunchType = Field(
-        description="지금은 항상 static_web_server를 반환하세요 (다른 값은 아직 미구현)"
+        description="이번 실행에서 지정된 값 그대로 반환하세요 (직접 고르지 마세요)"
     )
     launch_command: str = Field(description="앱 실행 커맨드, 예: 'python -m http.server 8000'")
-    entry_url: str = Field(description="접속 URL, 예: 'http://localhost:8000/index.html'")
+    entry_url: str = Field(description="접속 URL, 예: 'http://localhost:8000/index.html' (Electron이면 빈 문자열)")
 
 
 class DevOutputSchema(BaseModel):
-    """Full contents of the three static app files for one Developer attempt.
+    """Full contents of the app files for one Developer attempt.
 
-    The model always returns all three files in full (not a diff) so each
-    Phase can accumulate on top of the previous Phase's output.
+    index_html/style_css/app_js are always required -- they're the UI for
+    both launch types (a static web app serves them directly; an Electron
+    app's BrowserWindow loads the same index.html as its renderer).
+    main_js/package_json are additionally required only when
+    launch_config.launch_type is electron_app (Electron's main-process
+    entry point + manifest); left null for static_web_server.
+
+    The model always returns full file contents (not a diff) so each Phase
+    can accumulate on top of the previous Phase's output.
     """
 
     index_html: str = Field(description="index.html 전체 내용")
@@ -56,6 +69,16 @@ class DevOutputSchema(BaseModel):
     app_js: str = Field(description="app.js 전체 내용 (바닐라 JS, module 금지)")
     launch_config: LaunchConfigSchema = Field(description="이 앱을 어떻게 실행해서 검증할지")
     summary: str = Field(description="이번 Phase에서 구현/수정한 내용에 대한 한두 문장 요약")
+    main_js: str | None = Field(
+        default=None,
+        description="Electron main.js 전체 내용. launch_type이 electron_app일 때만 채우고, "
+        "static_web_server면 null로 두세요.",
+    )
+    package_json: str | None = Field(
+        default=None,
+        description="package.json 전체 내용 (main 필드는 반드시 'main.js'). launch_type이 "
+        "electron_app일 때만 채우고, static_web_server면 null로 두세요.",
+    )
 
 
 class ReviewOutputSchema(BaseModel):

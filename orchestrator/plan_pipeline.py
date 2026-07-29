@@ -74,6 +74,10 @@ TERMINAL_STATUSES = {
 }
 
 APP_FILES = ("index.html", "style.css", "app.js")
+# Electron-only extra files (see agents/developer.py's ELECTRON_FILES) --
+# only used for the final report's file listing, which just skips whatever
+# doesn't exist, so this is a no-op for static_web_server runs.
+ELECTRON_FILES = ("main.js", "package.json")
 
 
 class PlanDrivenPipeline:
@@ -460,7 +464,7 @@ class PlanDrivenPipeline:
 
     def _build_final_files_summary(self) -> dict[str, str]:
         summary: dict[str, str] = {}
-        for name in APP_FILES:
+        for name in APP_FILES + ELECTRON_FILES:
             path = self.config.target_app_dir / name
             if not path.exists():
                 continue

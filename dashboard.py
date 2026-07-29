@@ -18,6 +18,7 @@ verification -- don't touch the mouse/keyboard while a run is in progress.
 from __future__ import annotations
 
 import builtins
+import dataclasses
 import json
 import queue
 import threading
@@ -39,15 +40,16 @@ st.set_page_config(page_title="Vision Dev Agents", page_icon="🤖")
 
 POLL_INTERVAL_SECONDS = 1.5
 
-# Only STATIC_WEB_SERVER is actually implemented (agents/gui_tester.py's
-# launch_app() dispatcher raises NotImplementedError for the other two) --
-# the selector still lists all three so the target platform is a visible,
+# STATIC_WEB_SERVER and ELECTRON_APP are both implemented now
+# (agents/gui_tester.py's launch_app() dispatcher). NATIVE_EXE still isn't
+# -- the selector still lists it so the target platform is a visible,
 # explicit choice rather than an assumption baked into the code.
 LAUNCH_TYPE_LABELS: dict[LaunchType, str] = {
     LaunchType.STATIC_WEB_SERVER: "웹 앱 (정적 웹, HTML/CSS/JS)",
+    LaunchType.ELECTRON_APP: "Electron 앱 (데스크톱)",
     LaunchType.NATIVE_EXE: "데스크톱 앱 (Native EXE) -- 아직 미지원",
-    LaunchType.ELECTRON_APP: "Electron 앱 -- 아직 미지원",
 }
+UNSUPPORTED_LAUNCH_TYPES = {LaunchType.NATIVE_EXE}
 
 STATUS_LABELS = {
     "dev_done": "개발 완료, 코드 리뷰 진행 중...",
@@ -279,7 +281,7 @@ def main() -> None:
             st.session_state.messages.append(
                 {"role": "assistant", "content": "이미 파이프라인이 실행 중입니다. 완료될 때까지 기다려주세요."}
             )
-        elif selected_launch_type != LaunchType.STATIC_WEB_SERVER:
+        elif selected_launch_type in UNSUPPORTED_LAUNCH_TYPES:
             st.session_state.messages.append(
                 {
                     "role": "assistant",
@@ -295,7 +297,11 @@ def main() -> None:
             st.session_state.bridge = new_bridge
             st.session_state.phase_snapshot = {}
             st.session_state.snapshot_seeded = False
-            new_bridge.start(prompt, config)
+            # target_launch_type is a per-run choice (the dashboard's own
+            # selectbox), not an .env deployment setting -- override it on
+            # a copy of the base config rather than mutating the shared one.
+            run_config = dataclasses.replace(config, target_launch_type=selected_launch_type)
+            new_bridge.start(prompt, run_config)
         st.rerun()
 
     if pipeline_active:

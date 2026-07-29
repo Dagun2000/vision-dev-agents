@@ -25,6 +25,7 @@ plan.json and the Developer feedback loop.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from datetime import datetime
 from pathlib import Path
@@ -47,6 +48,7 @@ from agents.gui.execution import (
     close_window,
     enable_windows_dpi_awareness,
     open_browser_maximized,
+    open_native_app_maximized,
     open_new_tab,
     type_text,
 )
@@ -236,7 +238,49 @@ class OpenAIGUITesterAgent(GUITesterAgent):
     def _launch_electron_app(
         self, launch_config: LaunchConfig
     ) -> tuple[LocalStaticServer | None, BrowserWindow]:
-        raise NotImplementedError("launch_type=electron_app 아직 미구현")
+        """Launch the Electron app the Developer wrote into target-app/ and
+        find/activate/maximize the resulting window.
+
+        Deliberately ignores launch_config.launch_command/entry_url --
+        same "don't exec LLM output for anything execution-critical" rule
+        as _launch_static_web_server() not exec'ing the literal
+        launch_command. The electron.exe binary lives at a fixed, known
+        path because agents/developer.py's _ensure_electron_installed()
+        put it there itself (never installed from the LLM's package.json
+        content either).
+
+        No LocalStaticServer here -- Electron serves its own renderer
+        process directly, there's nothing to run our own http.server for.
+
+        Two things confirmed necessary by direct testing (see
+        agents/gui/execution.py's open_native_app_maximized() docstring
+        for the window-handling side):
+        - ELECTRON_RUN_AS_NODE must be stripped from the child's
+          environment -- set globally in at least one real environment
+          (the harness this was developed in), and it silently makes
+          Electron run main.js as plain Node instead of actually launching
+          the app (no window, no error, `app` just comes back undefined).
+        - A fresh --user-data-dir per launch is Electron's equivalent of
+          the web path's per-Phase port trick: a different profile
+          directory means a naturally empty localStorage/IndexedDB every
+          launch, no explicit clearing needed.
+        """
+        electron_bin = (
+            self.config.target_app_dir / "node_modules" / "electron" / "dist" / "electron.exe"
+        )
+        if not electron_bin.exists():
+            raise FileNotFoundError(
+                f"{electron_bin} not found -- expected agents/developer.py's "
+                "_ensure_electron_installed() to have put it there before GUI verification"
+            )
+
+        profile_dir = self.config.logs_dir / "electron_profiles" / f"profile_{self._launch_count}"
+        self._launch_count += 1
+
+        env = {k: v for k, v in os.environ.items() if k != "ELECTRON_RUN_AS_NODE"}
+        command = [str(electron_bin), ".", f"--user-data-dir={profile_dir}"]
+        window = open_native_app_maximized(command, cwd=str(self.config.target_app_dir), env=env)
+        return None, window
 
     # ---- step 4-3: full capture -> judge -> act -> verify loop ---------
 
@@ -361,7 +405,8 @@ class OpenAIGUITesterAgent(GUITesterAgent):
                 success=False, step_log=step_entries, symptom=symptom, screenshot_paths=screenshot_paths
             )
         finally:
-            server.stop()
+            if server is not None:
+                server.stop()
             self._last_window = window
 
     # ---- internals -------------------------------------------------------

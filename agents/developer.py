@@ -20,7 +20,7 @@ from pathlib import Path
 
 from agents.base import DeveloperAgent
 from agents.llm_client import TextPart, structured_completion
-from agents.models import DevResult, LaunchConfig, Phase, PhaseStatus
+from agents.models import DevResult, LaunchConfig, LaunchType, Phase, PhaseStatus
 from agents.schemas import DevOutputSchema
 from orchestrator.config import ROOT_DIR, PipelineConfig
 from orchestrator.proc import run_utf8
@@ -29,7 +29,13 @@ logger = logging.getLogger("pipeline")
 
 MAX_JS_LINT_RETRIES = 3
 ESLINT_CONFIG = ROOT_DIR / "tools" / "eslint.config.js"
+# Always the renderer/UI files, for both launch types -- a static web app
+# serves them directly, an Electron app's BrowserWindow loads the same
+# index.html as its renderer.
 APP_FILES = ("index.html", "style.css", "app.js")
+# Electron's main-process entry point + manifest, additionally required
+# only when target_launch_type is electron_app.
+ELECTRON_FILES = ("main.js", "package.json")
 
 SYSTEM_PROMPT = """\
 당신은 멀티 에이전트 자동 개발 파이프라인의 개발자(Developer) 에이전트입니다.
@@ -53,6 +59,36 @@ index.html / style.css / app.js 세 파일로 점진적으로 완성하는 것�
   지원되지 않습니다). launch_command는 "python -m http.server 8000"과
   같은 형태로, entry_url은 "http://localhost:8000/index.html"과 같은
   형태로 작성하세요.
+"""
+
+ELECTRON_SYSTEM_PROMPT = """\
+당신은 멀티 에이전트 자동 개발 파이프라인의 개발자(Developer) 에이전트입니다.
+목표는 localStorage만 사용하는 Todo 리스트 앱을 Electron 데스크톱 앱으로,
+index.html / style.css / app.js / main.js / package.json 다섯 파일로
+점진적으로 완성하는 것입니다.
+
+규칙:
+- index.html/style.css/app.js는 Electron의 BrowserWindow가 그대로 불러오는
+  렌더러 화면입니다. localStorage만 사용하는 순수 HTML/CSS/바닐라
+  JavaScript로 작성하세요 (외부 라이브러리, CDN, import/require, module
+  문법 금지 -- 정적 웹앱 버전과 동일한 제약입니다).
+- 이번에 주어지는 "현재 파일 내용"은 이전 Phase까지 누적된 결과물입니다.
+  이번 Phase의 요구사항만큼만 이어서 추가/수정하고, 기존에 이미 동작하던
+  기능을 망가뜨리지 마세요.
+- 응답에는 다섯 파일의 "전체" 내용을 다시 작성해서 반환하세요 (diff가
+  아닙니다). 변경이 필요 없는 파일도 전체 내용을 그대로 반환하세요.
+- main.js는 Electron 메인 프로세스 진입점입니다. `app.whenReady()` 이후
+  `BrowserWindow`를 생성하고 `loadFile('index.html')`로 렌더러를
+  불러오세요. nodeIntegration/contextIsolation 같은 보안 관련 옵션은
+  기본값 그대로 두세요 (렌더러 쪽에서 Node API를 직접 쓰지 않습니다).
+- package.json은 반드시 `"main": "main.js"`를 포함하세요. dependencies는
+  비워두거나 생략하세요 (electron 자체는 실행 환경이 별도로 설치/관리합니다
+  -- 여기에 적어도 실제로 설치되지 않습니다).
+- 이전 시도의 eslint 오류가 주어지면 그 오류를 반드시 고치세요 (app.js만
+  검사 대상입니다).
+- launch_config.launch_type은 항상 "electron_app"으로 고정하세요.
+  launch_command/entry_url은 실제 실행에는 쓰이지 않으니 대략적인 설명만
+  적으면 됩니다.
 """
 
 
@@ -106,7 +142,7 @@ class OpenAIDeveloperAgent(DeveloperAgent):
                 return DevResult(
                     phase_id=phase.id,
                     summary=generated.summary,
-                    files_changed=list(APP_FILES),
+                    files_changed=list(self._current_file_names()),
                     launch_config=LaunchConfig(
                         launch_type=generated.launch_config.launch_type,
                         launch_command=generated.launch_config.launch_command,
@@ -183,9 +219,14 @@ class OpenAIDeveloperAgent(DeveloperAgent):
 
     # ---- internals ------------------------------------------------------
 
+    def _current_file_names(self) -> tuple[str, ...]:
+        if self.config.target_launch_type == LaunchType.ELECTRON_APP:
+            return APP_FILES + ELECTRON_FILES
+        return APP_FILES
+
     def _read_current_files(self) -> dict[str, str]:
         files: dict[str, str] = {}
-        for name in APP_FILES:
+        for name in self._current_file_names():
             path = self.config.target_app_dir / name
             files[name] = path.read_text(encoding="utf-8") if path.exists() else ""
         return files
@@ -199,6 +240,59 @@ class OpenAIDeveloperAgent(DeveloperAgent):
             generated.style_css, encoding="utf-8"
         )
         (self.config.target_app_dir / "app.js").write_text(generated.app_js, encoding="utf-8")
+        # Electron-only -- both null for static_web_server (see
+        # DevOutputSchema), so this is a no-op for the existing web path.
+        if generated.main_js is not None:
+            (self.config.target_app_dir / "main.js").write_text(
+                generated.main_js, encoding="utf-8"
+            )
+        if generated.package_json is not None:
+            (self.config.target_app_dir / "package.json").write_text(
+                generated.package_json, encoding="utf-8"
+            )
+            self._ensure_electron_installed()
+
+    def _ensure_electron_installed(self) -> None:
+        """electron itself is never trusted from the LLM's package.json --
+        same "don't exec LLM output for anything execution-critical" rule
+        as launch_command (see agents/gui_tester.py). Idempotent: skips
+        reinstalling if the binary's already there, since this can run
+        again on every lint/review retry within the same Phase.
+
+        Two steps, confirmed necessary by direct testing -- this package
+        version's package.json has an *empty* "scripts" object, so `npm
+        install electron` alone only gets the small JS wrapper (fast, ~1s)
+        and never downloads the actual electron.exe; the binary only gets
+        fetched by explicitly running the wrapper's own install.js
+        afterward (also fast once npm's cache is warm, but does a real
+        download the first time -- hence the generous timeouts).
+        """
+        electron_bin = (
+            self.config.target_app_dir / "node_modules" / "electron" / "dist" / "electron.exe"
+        )
+        if electron_bin.exists():
+            return
+        npm_path = shutil.which("npm")
+        node_path = shutil.which("node")
+        if npm_path is None or node_path is None:
+            logger.warning("Developer: npm/node not found on PATH, cannot install electron")
+            return
+        logger.info("Developer: installing electron in %s", self.config.target_app_dir)
+        try:
+            run_utf8(
+                [npm_path, "install", "electron", "--no-fund", "--no-audit"],
+                cwd=str(self.config.target_app_dir),
+                timeout=300,
+            )
+            install_script = self.config.target_app_dir / "node_modules" / "electron" / "install.js"
+            if install_script.exists():
+                run_utf8([node_path, str(install_script)], cwd=str(self.config.target_app_dir), timeout=300)
+        except subprocess.TimeoutExpired:
+            logger.warning("Developer: electron install timed out")
+        if not electron_bin.exists():
+            logger.warning(
+                "Developer: electron.exe still missing after install attempt (%s)", electron_bin
+            )
 
     def _generate_files(
         self,
@@ -208,10 +302,15 @@ class OpenAIDeveloperAgent(DeveloperAgent):
         review_issues: list[str] | None = None,
     ) -> DevOutputSchema:
         user_message = self._build_user_message(phase, current_files, lint_feedback, review_issues)
+        system_prompt = (
+            ELECTRON_SYSTEM_PROMPT
+            if self.config.target_launch_type == LaunchType.ELECTRON_APP
+            else SYSTEM_PROMPT
+        )
         return structured_completion(
             config=self.config,
             model=self.config.developer_model,
-            system_prompt=SYSTEM_PROMPT,
+            system_prompt=system_prompt,
             parts=[TextPart(user_message)],
             schema=DevOutputSchema,
         )
@@ -229,7 +328,7 @@ class OpenAIDeveloperAgent(DeveloperAgent):
             f"\n## 성공 조건\n{criteria}",
             "\n## 현재 파일 내용 (이전 Phase까지 누적된 결과물)",
         ]
-        for name in APP_FILES:
+        for name in self._current_file_names():
             content = current_files.get(name, "")
             if content:
                 parts.append(f"\n### {name}\n```\n{content}\n```")
