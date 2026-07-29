@@ -7,10 +7,14 @@ Scope so far:
 - 4-2: send the labeled screenshot (image only -- no separate OCR text
   list) plus the Phase's success_criteria to the Vision model and get back
   a single next-action decision (agents/gui/judgment.py).
-- 4-3: execute that action for real via PyAutoGUI (agents/gui/execution.py),
-  check whether the screen actually changed, and loop
-  capture -> judge -> execute -> check up to MAX_GUI_STEPS times, building
+- 4-3: execute that action for real via PyAutoGUI (agents/gui/execution.py)
+  and loop capture -> judge -> execute up to MAX_GUI_STEPS times, building
   a step_log and returning a GUITestOutputSchema. Exposed as verify_phase().
+  Deliberately no code-side "did the screen change" verdict is fed back
+  into the model's history -- success/failure is judged purely from what
+  the model itself sees in each new labeled screenshot, the same way a
+  human tester would (a prior pixel-diff heuristic here produced a
+  confirmed false negative that overrode the model's own correct reading).
 
 Local OCR (agents/gui/ocr.py) is intentionally NOT used here: this is a
 GPU-less environment, so per-box OCR was dropped in favor of letting the
@@ -40,8 +44,6 @@ from agents.gui.detection import (
     BoundingBox,
     detect_clickable_elements,
     overlay_labels,
-    padded_region,
-    screenshots_differ,
 )
 from agents.gui.execution import (
     BrowserWindow,
@@ -63,16 +65,7 @@ from orchestrator.config import PipelineConfig
 logger = logging.getLogger("pipeline")
 
 MAX_GUI_STEPS = 8
-# After this many consecutive ineffective actions (no target found, or the
-# screen just didn't change), tell the model explicitly instead of letting
-# it keep retrying the same wrong coordinates.
-CONSECUTIVE_INEFFECTIVE_LIMIT = 2
 ACTION_SETTLE_SECONDS = 0.5
-# Margin (px) added around an action's target box when diffing just that
-# region -- just enough to catch visual feedback that overflows the box
-# slightly (typed text, a checkbox's strikethrough label), without pulling
-# in unrelated neighboring elements.
-LOCAL_DIFF_PADDING_PX = 6
 
 
 class OpenAIGUITesterAgent(GUITesterAgent):
@@ -356,8 +349,6 @@ class OpenAIGUITesterAgent(GUITesterAgent):
         step_entries: list[GUIStepLogEntry] = []
         step_history: list[str] = []
         screenshot_paths: list[str] = []
-        consecutive_ineffective = 0
-        note_for_model: str | None = None
 
         server, window = self.launch_app(phase.launch_config)
         try:
@@ -372,15 +363,11 @@ class OpenAIGUITesterAgent(GUITesterAgent):
                 labeled_image = overlay_labels(current_image, boxes)
                 screenshot_paths.append(self._save_step_screenshot(phase, step, labeled_image))
 
-                prompt_history = list(step_history)
-                if note_for_model:
-                    prompt_history.append(note_for_model)
-
                 action = decide_next_action(
                     config=self.config,
                     labeled_screenshot=labeled_image,
                     success_criteria=phase.success_criteria,
-                    step_log=prompt_history,
+                    step_log=step_history,
                 )
 
                 if action.action == "success":
@@ -411,47 +398,28 @@ class OpenAIGUITesterAgent(GUITesterAgent):
                 if box is None:
                     result_text = f"{action.target_element}번 요소를 찾을 수 없어 실행하지 못함"
                     logger.warning("GUI: phase=%s step=%d %s", phase.id, step, result_text)
-                    ineffective = True
                 else:
                     click_at(window, *box.center)
                     if action.action == "type":
                         type_text(action.text or "")
                     time.sleep(ACTION_SETTLE_SECONDS)
-                    new_image = capture_screenshot(window)
-
-                    # A change can be small-and-local (typed text; a
-                    # checkbox toggling + its label getting a strikethrough)
-                    # or small-relative-to-the-screen-but-elsewhere (a new
-                    # list item appearing below an "add" button that itself
-                    # doesn't visually change). Neither check alone catches
-                    # both, so treat it as changed if either does: the
-                    # target box's own region (+ margin), OR the whole
-                    # screen.
-                    local_region = padded_region(box, LOCAL_DIFF_PADDING_PX, current_image.size)
-                    changed = screenshots_differ(
-                        current_image, new_image, region=local_region
-                    ) or screenshots_differ(current_image, new_image)
-                    current_image = new_image
-                    result_text = "화면이 변경됨" if changed else "화면이 변경되지 않음"
-                    ineffective = not changed
+                    # No pixel-diff verdict here on purpose: a code-side
+                    # "screen changed / didn't change" claim can be wrong
+                    # (confirmed by a real false negative -- a Tkinter
+                    # counter's digit swap moved fewer pixels than the old
+                    # global-ratio threshold required), and once stated as
+                    # fact in step_history the model trusted it over its
+                    # own correct reading of the next screenshot. Just
+                    # record that the action was executed; the model judges
+                    # success/failure purely from what it actually sees in
+                    # the next labeled screenshot, the same way a human
+                    # tester would.
+                    current_image = capture_screenshot(window)
+                    result_text = "실행함"
 
                 step_entries.append(GUIStepLogEntry(step=step, action=action_desc, result=result_text))
                 step_history.append(f"{action_desc} -> {result_text}")
                 logger.info("GUI: phase=%s step=%d %s -> %s", phase.id, step, action_desc, result_text)
-
-                if ineffective:
-                    consecutive_ineffective += 1
-                    if consecutive_ineffective >= CONSECUTIVE_INEFFECTIVE_LIMIT:
-                        note_for_model = (
-                            f"최근 {consecutive_ineffective}회 연속으로 액션이 화면 변화를 "
-                            f"일으키지 못했습니다 (마지막 시도: {action_desc}). 같은 요소를 다시 "
-                            "시도하지 말고 다른 요소나 접근을 고려하세요."
-                        )
-                    else:
-                        note_for_model = None
-                else:
-                    consecutive_ineffective = 0
-                    note_for_model = None
 
             symptom = self._summarize_step_limit(step_entries)
             logger.warning("GUI: phase=%s exceeded max_steps=%d -- %s", phase.id, max_steps, symptom)
