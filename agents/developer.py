@@ -16,6 +16,7 @@ import json
 import logging
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from agents.base import DeveloperAgent
@@ -36,6 +37,10 @@ APP_FILES = ("index.html", "style.css", "app.js")
 # Electron's main-process entry point + manifest, additionally required
 # only when target_launch_type is electron_app.
 ELECTRON_FILES = ("main.js", "package.json")
+# Tkinter POC: a single native-widget script, used instead of (not
+# alongside) APP_FILES -- there is no HTML/CSS/JS involved at all here,
+# unlike Electron which still renders index.html.
+TKINTER_FILES = ("main.py",)
 
 SYSTEM_PROMPT = """\
 당신은 멀티 에이전트 자동 개발 파이프라인의 개발자(Developer) 에이전트입니다.
@@ -91,6 +96,40 @@ index.html / style.css / app.js / main.js / package.json 다섯 파일로
   적으면 됩니다.
 """
 
+TKINTER_SYSTEM_PROMPT = """\
+당신은 멀티 에이전트 자동 개발 파이프라인의 개발자(Developer) 에이전트입니다.
+목표는 Python 표준 라이브러리 tkinter만 사용하는 데스크톱 GUI 앱을 main.py
+한 파일로 점진적으로 완성하는 것입니다.
+
+규칙:
+- Python 표준 라이브러리(tkinter, json, pathlib, sys 등)만 사용하세요. pip로
+  별도 설치가 필요한 외부 패키지는 사용할 수 없습니다.
+- 이번에 주어지는 "현재 파일 내용"은 이전 Phase까지 누적된 결과물입니다.
+  이번 Phase의 요구사항만큼만 이어서 추가/수정하고, 기존에 이미 동작하던
+  기능을 망가뜨리지 마세요.
+- 응답에는 main.py의 "전체" 내용을 다시 작성해서 반환하세요 (diff가
+  아닙니다).
+- 상태를 저장해야 한다면 스크립트와 같은 디렉터리의 JSON 파일(예:
+  state.json)에 저장하세요. localStorage 같은 브라우저 API는 여기서 쓸 수
+  없습니다.
+- **필수 규칙 (반드시 지키세요)**: main.py는 커맨드라인 인자 `--reset`을
+  지원해야 합니다. `python main.py --reset`으로 실행하면:
+  1. 저장된 상태 파일이 있으면 삭제하고 (없으면 그냥 넘어가고, 에러를 내지
+     않고),
+  2. Tk 윈도우를 생성하거나 mainloop()를 호출하지 *않고* 즉시
+     프로세스를 종료해야 합니다.
+  이 `--reset` 처리는 반드시 윈도우 생성/mainloop 코드보다 먼저 실행되도록
+  파일 맨 앞쪽에 두세요 (예: `if "--reset" in sys.argv:` 분기를 먼저 처리하고
+  `sys.exit(0)`). `--reset` 인자 없이 실행할 때는 평소처럼 상태를 불러와
+  윈도우를 띄우고 mainloop()를 시작하세요.
+- 이전 시도의 문법 오류(python -m py_compile)가 주어지면 반드시 고치세요.
+- index_html/style_css/app_js 필드는 이 launch_type에서는 사용하지 않으니
+  빈 문자열("")로 반환하세요. main_js/package_json 필드는 null로 두세요.
+- launch_config.launch_type은 항상 "python_tkinter"로 고정하세요.
+  launch_command/entry_url은 실제 실행에는 쓰이지 않으니 대략적인 설명만
+  적으면 됩니다 (entry_url은 빈 문자열로 두어도 됩니다).
+"""
+
 
 class DeveloperLintError(RuntimeError):
     """Raised when app.js still fails lint after MAX_JS_LINT_RETRIES attempts."""
@@ -136,7 +175,10 @@ class OpenAIDeveloperAgent(DeveloperAgent):
             generated = self._generate_files(phase, current_files, lint_feedback, review_issues)
             self._write_files(generated)
 
-            lint_ok, lint_message = self._lint_js(self.config.target_app_dir / "app.js")
+            if self.config.target_launch_type == LaunchType.PYTHON_TKINTER:
+                lint_ok, lint_message = self._lint_python(self.config.target_app_dir / "main.py")
+            else:
+                lint_ok, lint_message = self._lint_js(self.config.target_app_dir / "app.js")
             if lint_ok:
                 logger.info("Developer: phase=%s lint passed -- %s", phase.id, lint_message)
                 return DevResult(
@@ -166,6 +208,12 @@ class OpenAIDeveloperAgent(DeveloperAgent):
                 "style.css": generated.style_css,
                 "app.js": generated.app_js,
             }
+            if generated.main_js is not None:
+                current_files["main.js"] = generated.main_js
+            if generated.package_json is not None:
+                current_files["package.json"] = generated.package_json
+            if generated.tkinter_main_py is not None:
+                current_files["main.py"] = generated.tkinter_main_py
 
         raise DeveloperLintError(
             f"Phase {phase.id}: app.js failed lint after {MAX_JS_LINT_RETRIES} attempts"
@@ -222,6 +270,8 @@ class OpenAIDeveloperAgent(DeveloperAgent):
     def _current_file_names(self) -> tuple[str, ...]:
         if self.config.target_launch_type == LaunchType.ELECTRON_APP:
             return APP_FILES + ELECTRON_FILES
+        if self.config.target_launch_type == LaunchType.PYTHON_TKINTER:
+            return TKINTER_FILES
         return APP_FILES
 
     def _read_current_files(self) -> dict[str, str]:
@@ -233,6 +283,16 @@ class OpenAIDeveloperAgent(DeveloperAgent):
 
     def _write_files(self, generated: DevOutputSchema) -> None:
         self.config.target_app_dir.mkdir(parents=True, exist_ok=True)
+        if self.config.target_launch_type == LaunchType.PYTHON_TKINTER:
+            # No HTML/CSS/JS involved at all here (unlike Electron, which
+            # still renders index.html) -- index_html/style_css/app_js are
+            # just empty-string placeholders per TKINTER_SYSTEM_PROMPT, not
+            # worth writing to disk.
+            if generated.tkinter_main_py is not None:
+                (self.config.target_app_dir / "main.py").write_text(
+                    generated.tkinter_main_py, encoding="utf-8"
+                )
+            return
         (self.config.target_app_dir / "index.html").write_text(
             generated.index_html, encoding="utf-8"
         )
@@ -302,11 +362,12 @@ class OpenAIDeveloperAgent(DeveloperAgent):
         review_issues: list[str] | None = None,
     ) -> DevOutputSchema:
         user_message = self._build_user_message(phase, current_files, lint_feedback, review_issues)
-        system_prompt = (
-            ELECTRON_SYSTEM_PROMPT
-            if self.config.target_launch_type == LaunchType.ELECTRON_APP
-            else SYSTEM_PROMPT
-        )
+        if self.config.target_launch_type == LaunchType.ELECTRON_APP:
+            system_prompt = ELECTRON_SYSTEM_PROMPT
+        elif self.config.target_launch_type == LaunchType.PYTHON_TKINTER:
+            system_prompt = TKINTER_SYSTEM_PROMPT
+        else:
+            system_prompt = SYSTEM_PROMPT
         return structured_completion(
             config=self.config,
             model=self.config.developer_model,
@@ -418,4 +479,19 @@ class OpenAIDeveloperAgent(DeveloperAgent):
 
         if result.returncode == 0:
             return True, "node --check: no syntax errors (eslint unavailable, syntax-only check)"
+        return False, (result.stderr.strip() or result.stdout.strip())
+
+    def _lint_python(self, py_path: Path) -> tuple[bool, str]:
+        if not py_path.exists():
+            return False, f"{py_path} 파일이 생성되지 않았습니다"
+
+        try:
+            result = run_utf8(
+                [sys.executable, "-m", "py_compile", str(py_path)], cwd=str(ROOT_DIR), timeout=30
+            )
+        except subprocess.TimeoutExpired:
+            return False, "python -m py_compile 실행이 시간 초과되었습니다"
+
+        if result.returncode == 0:
+            return True, "py_compile: no syntax errors"
         return False, (result.stderr.strip() or result.stdout.strip())

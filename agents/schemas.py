@@ -79,6 +79,11 @@ class DevOutputSchema(BaseModel):
         description="package.json 전체 내용 (main 필드는 반드시 'main.js'). launch_type이 "
         "electron_app일 때만 채우고, static_web_server면 null로 두세요.",
     )
+    tkinter_main_py: str | None = Field(
+        default=None,
+        description="Tkinter main.py 전체 내용. launch_type이 python_tkinter일 때만 채우고, "
+        "그 외에는 null로 두세요.",
+    )
 
 
 class ReviewOutputSchema(BaseModel):

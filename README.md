@@ -69,16 +69,67 @@ own failures (missing file, write error, anything) and never affect the
 pipeline's success/failure — this feature existing, or not, changes nothing
 else about how a run behaves.
 
-### Current status: web apps only
+### Current status: three launch types implemented
 
-`agents/models.py`'s `LaunchType` has three values (`STATIC_WEB_SERVER`,
-`NATIVE_EXE`, `ELECTRON_APP`), and the dashboard's app-type selector lists
-all three — but only `STATIC_WEB_SERVER` is actually implemented.
-`agents/gui_tester.py`'s `launch_app()` dispatcher raises
-`NotImplementedError` for the other two; they're placeholders for
-generalizing the GUI Tester's execution layer beyond static web apps later.
-Picking "Native EXE" or "Electron" in the dashboard just declines to start a
-run instead of silently doing nothing.
+`agents/models.py`'s `LaunchType` has four values. `STATIC_WEB_SERVER`,
+`ELECTRON_APP`, and `PYTHON_TKINTER` (a POC — see below) are implemented;
+`NATIVE_EXE` is a deliberate unimplemented placeholder — see "Adding a new
+launch type" for why new native targets each get their own specific enum
+value instead of being folded into it. `agents/gui_tester.py`'s
+`launch_app()` dispatcher raises `NotImplementedError` for `NATIVE_EXE`;
+picking it in the dashboard just declines to start a run instead of
+silently doing nothing.
+
+### Adding a new launch type
+
+Every launch type follows the same shape — `STATIC_WEB_SERVER` →
+`ELECTRON_APP` → `PYTHON_TKINTER` were each added by touching the same
+handful of places, never a shared abstraction beyond the execution layer
+(window launch/find/maximize is generic and reusable as-is; everything
+about code *generation* is not, and shouldn't be forced to be):
+
+1. **`agents/models.py`**: add a new, specific `LaunchType` value (e.g.
+   `PYTHON_TKINTER`, not a generic bucket — each concrete framework gets
+   its own name, added one at a time).
+2. **`agents/schemas.py`**: add an optional field to `DevOutputSchema` for
+   that target's extra file(s) (e.g. `tkinter_main_py: str | None`), null
+   unless this run's `target_launch_type` is the new one.
+3. **`agents/developer.py`**: a new `..._SYSTEM_PROMPT`, and branch
+   `_current_file_names()` / `_write_files()` / `_generate_files()` by
+   `config.target_launch_type` the same way the existing ones are branched.
+   Add a build/install step here too if the target needs one — don't
+   assume a new toolchain "just works" on the first try (Electron's
+   `npm install electron` alone turned out not to be enough; verify
+   whatever the new target needs by testing it directly).
+   **Standing rule for every new launch type, no exceptions**: the system
+   prompt must *require* the generated app to implement an easy,
+   automatable reset mechanism — a `--reset` CLI flag that wipes any
+   persisted state and exits *immediately, without ever opening a window*.
+   Every launch type needs some way to guarantee a clean slate between
+   Phases/retries; the web path gets it for free (a different port is a
+   different origin, so a naturally empty `localStorage`) and Electron
+   gets it for free (a fresh `--user-data-dir` per launch), but neither
+   trick generalizes to plain native processes — those need the generated
+   app itself to cooperate, which only works if the prompt mandates it.
+4. **`agents/gui_tester.py`**: a new `_launch_xxx()`, run automatically
+   (as a blocking subprocess) before the real launch. Reuse
+   `agents/gui/execution.py`'s `open_native_app_maximized()` for the real
+   launch — it's already generic (subprocess launch + window-handle
+   diffing + activate/maximize, no browser-specific assumptions), so no
+   new window-finding logic should be needed.
+5. **Test with a hand-written fixture first, before wiring up the LLM
+   generation side at all** — write a minimal app by hand for the new
+   target (a button + label is enough), then confirm launch + window
+   detection + screenshot + Set-of-marks labeling all work on that
+   target's actual rendering. This is the only way to learn whether
+   `agents/gui/detection.py`'s stroke/fill contour detection (tuned
+   against Chromium's rendering — both the web and Electron paths render
+   via Chromium) even works on a structurally different rendering engine,
+   before spending any API calls on code generation. If detection doesn't
+   generalize, the fix belongs in `detection.py`, not in the launch
+   plumbing.
+6. Update `dashboard.py`'s `LAUNCH_TYPE_LABELS` and, once the previous
+   steps are done, remove the type from `UNSUPPORTED_LAUNCH_TYPES`.
 
 ### How a run flows
 
@@ -167,7 +218,7 @@ agents at once), `PLANNER_MODEL` / `DEVELOPER_MODEL` / `REVIEWER_MODEL` /
 ├── scripts/                 # Smoke tests for individual agents/subsystems
 ├── tools/eslint.config.js   # Flat-config eslint used by the Developer's self-lint step
 ├── config/requirement.txt   # The requirement main.py reads
-├── target-app/              # Generated app output (index.html/style.css/app.js) -- not source, regenerated every run
+├── target-app/              # Generated app output (index.html/style.css/app.js, or main.js/package.json for Electron, or main.py for Tkinter) -- not source, regenerated every run
 ├── state/plan.json          # Single source of truth for every Phase's status (one run)
 ├── state/lessons.md         # Long-term memory across runs (see above) -- not one run's state
 ├── logs/                    # Run logs, incremental Markdown reports, GUI Tester screenshots
@@ -290,16 +341,65 @@ Planner가 "무엇을 시도했다가 왜 실패했고 대신 뭐가 통했는�
 성공/실패에 절대 영향을 주지 않습니다 — 이 기능이 있든 없든 실행 자체의
 동작은 달라지지 않습니다.
 
-### 현재 상태: 웹앱만 구현됨
+### 현재 상태: 3가지 실행 방식 구현됨
 
-`agents/models.py`의 `LaunchType`에는 값이 3개(`STATIC_WEB_SERVER`,
-`NATIVE_EXE`, `ELECTRON_APP`) 있고 대시보드의 앱 타입 선택지도 셋 다
-보여주지만, 실제로 구현된 건 `STATIC_WEB_SERVER`뿐입니다.
-`agents/gui_tester.py`의 `launch_app()` 디스패처는 나머지 둘에 대해
-`NotImplementedError`를 던집니다 — 나중에 GUI Tester의 실행 계층을 정적
-웹앱 이외로 일반화하기 위한 자리만 잡아둔 상태입니다. 대시보드에서
-"Native EXE"나 "Electron"을 선택하면 조용히 아무 일도 안 하는 대신, 실행
-자체를 시작하지 않고 지원 안 한다고 안내합니다.
+`agents/models.py`의 `LaunchType`에는 값이 4개 있습니다. `STATIC_WEB_SERVER`,
+`ELECTRON_APP`, `PYTHON_TKINTER`(POC — 아래 참고)는 구현되어 있고,
+`NATIVE_EXE`는 의도적으로 비워둔 자리입니다 — 새로운 네이티브 타겟을 왜
+여기 합치지 않고 각자 전용 enum 값으로 추가하는지는 아래 "새로운 실행
+방식 추가하기" 참고. `agents/gui_tester.py`의 `launch_app()` 디스패처는
+`NATIVE_EXE`에 대해 `NotImplementedError`를 던집니다. 대시보드에서
+선택하면 조용히 아무 일도 안 하는 대신, 실행 자체를 시작하지 않고 지원
+안 한다고 안내합니다.
+
+### 새로운 실행 방식 추가하기
+
+모든 실행 방식은 같은 패턴을 따릅니다 — `STATIC_WEB_SERVER` →
+`ELECTRON_APP` → `PYTHON_TKINTER` 모두 같은 몇 군데를 건드려서
+추가되었고, 실행 계층 이상으로 공유되는 추상화는 만들지 않았습니다
+(창을 띄우고/찾고/최대화하는 로직은 이미 범용적이라 그대로 재사용되지만,
+코드 *생성* 쪽은 타겟마다 다를 수밖에 없고 억지로 통일할 필요도 없습니다):
+
+1. **`agents/models.py`**: 새롭고 구체적인 `LaunchType` 값을 추가하세요
+   (예: `PYTHON_TKINTER` — 범용 값이 아니라, 각 프레임워크마다 전용
+   이름을 하나씩, 한 번에 하나씩 추가합니다).
+2. **`agents/schemas.py`**: `DevOutputSchema`에 이 타겟의 추가 파일용
+   optional 필드를 추가하세요 (예: `tkinter_main_py: str | None`) — 이번
+   실행의 `target_launch_type`이 그 값일 때만 채워지고, 그 외에는 null.
+3. **`agents/developer.py`**: 새 `..._SYSTEM_PROMPT`를 작성하고,
+   `_current_file_names()` / `_write_files()` / `_generate_files()`를
+   기존 것들과 같은 방식으로 `config.target_launch_type` 기준으로
+   분기하세요. 타겟에 설치/빌드 단계가 필요하면 여기에 추가하세요 —
+   새 툴체인이 "당연히 될 것"이라 가정하지 말고 직접 테스트로
+   확인하세요 (Electron은 `npm install electron`만으로는 부족했습니다 —
+   실제로 테스트해봐야 압니다).
+   **모든 새 실행 방식에 예외 없이 적용되는 표준 규칙**: 시스템
+   프롬프트는 생성된 앱이 쉽게 자동화 가능한 리셋 수단을 반드시
+   구현하도록 요구해야 합니다 — 저장된 상태를 지우고, 윈도우를 절대
+   띄우지 않은 채 즉시 종료하는 `--reset` 커맨드라인 플래그가 그것입니다.
+   모든 실행 방식은 Phase/재시도 사이에 깨끗한 상태를 보장할 방법이
+   필요합니다. 웹 경로는 공짜로 얻습니다(포트가 다르면 origin이 달라져서
+   `localStorage`가 자연히 비어있음), Electron도 공짜로 얻습니다(매
+   실행마다 새 `--user-data-dir`). 하지만 이 트릭들은 순수 네이티브
+   프로세스에는 일반화되지 않습니다 — 그런 타겟은 생성된 앱 자신이
+   협조해야만 하고, 프롬프트가 이를 강제해야만 실제로 작동합니다.
+4. **`agents/gui_tester.py`**: 새 `_launch_xxx()`를 만들고, 실제 실행
+   전에 (블로킹 서브프로세스로) 자동으로 실행되게 하세요. 실제 실행에는
+   `agents/gui/execution.py`의 `open_native_app_maximized()`를
+   재사용하세요 — 이미 범용적으로 만들어져 있어서(서브프로세스 실행 +
+   윈도우 핸들 비교 + 활성화/최대화, 브라우저 관련 가정 없음) 새로운
+   창 탐색 로직이 따로 필요하지 않을 겁니다.
+5. **LLM 생성 쪽을 연결하기 전에, 손으로 작성한 최소 fixture 앱으로 먼저
+   테스트하세요** — 새 타겟용으로 버튼 하나 + 라벨 하나짜리 앱을 손으로
+   작성한 뒤, 그 타겟의 실제 렌더링에서 실행 + 창 탐지 + 스크린샷 +
+   Set-of-marks 라벨링이 전부 되는지 확인하세요. Chromium 렌더링(웹/
+   Electron 둘 다 Chromium 기반) 기준으로 튜닝된
+   `agents/gui/detection.py`의 테두리/채움 컨투어 탐지가 구조적으로 다른
+   렌더링 엔진에서도 통하는지는 이렇게 확인하는 것 말고는 알 방법이
+   없습니다 — API 비용을 쓰기 전에 먼저 확인하세요. 탐지가 안 통하면
+   고칠 곳은 실행 플러밍이 아니라 `detection.py`입니다.
+6. `dashboard.py`의 `LAUNCH_TYPE_LABELS`를 갱신하고, 위 단계가 모두
+   끝나면 `UNSUPPORTED_LAUNCH_TYPES`에서 그 타입을 빼세요.
 
 ### 실행 흐름
 
@@ -385,7 +485,7 @@ cp .env.example .env   # LLM_PROVIDER 고르고, 그 provider의 API 키 입력
 ├── scripts/                 # 개별 에이전트/서브시스템 스모크 테스트
 ├── tools/eslint.config.js   # Developer 자체 린트용 flat config eslint
 ├── config/requirement.txt   # main.py가 읽는 요구사항
-├── target-app/              # 생성된 앱 결과물 (index.html/style.css/app.js) -- 소스 아님, 매 실행마다 재생성
+├── target-app/              # 생성된 앱 결과물 (index.html/style.css/app.js, Electron이면 main.js/package.json, Tkinter면 main.py) -- 소스 아님, 매 실행마다 재생성
 ├── state/plan.json          # 모든 Phase 상태의 단일 소스 (한 번의 실행)
 ├── state/lessons.md         # 실행 간 장기 기억 (위 설명 참고) -- 한 번의 실행 상태가 아님
 ├── logs/                    # 실행 로그, 누적 Markdown 리포트, GUI Tester 스크린샷

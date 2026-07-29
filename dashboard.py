@@ -40,13 +40,14 @@ st.set_page_config(page_title="Vision Dev Agents", page_icon="🤖")
 
 POLL_INTERVAL_SECONDS = 1.5
 
-# STATIC_WEB_SERVER and ELECTRON_APP are both implemented now
-# (agents/gui_tester.py's launch_app() dispatcher). NATIVE_EXE still isn't
-# -- the selector still lists it so the target platform is a visible,
+# STATIC_WEB_SERVER, ELECTRON_APP, and PYTHON_TKINTER are all implemented
+# now (agents/gui_tester.py's launch_app() dispatcher). NATIVE_EXE still
+# isn't -- the selector still lists it so the target platform is a visible,
 # explicit choice rather than an assumption baked into the code.
 LAUNCH_TYPE_LABELS: dict[LaunchType, str] = {
     LaunchType.STATIC_WEB_SERVER: "웹 앱 (정적 웹, HTML/CSS/JS)",
     LaunchType.ELECTRON_APP: "Electron 앱 (데스크톱)",
+    LaunchType.PYTHON_TKINTER: "Python Tkinter 앱 (데스크톱, POC)",
     LaunchType.NATIVE_EXE: "데스크톱 앱 (Native EXE) -- 아직 미지원",
 }
 UNSUPPORTED_LAUNCH_TYPES = {LaunchType.NATIVE_EXE}

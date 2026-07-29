@@ -30,7 +30,6 @@ from orchestrator.config import PipelineConfig
 logger = logging.getLogger("pipeline")
 
 MAX_REVIEW_RETRIES = 3
-APP_FILES = ("index.html", "style.css", "app.js")
 
 SYSTEM_PROMPT = """\
 당신은 멀티 에이전트 자동 개발 파이프라인의 코드 리뷰어(Reviewer) 에이전트입니다.
@@ -161,8 +160,12 @@ class OpenAIReviewerAgent(ReviewerAgent):
     # ---- internals ------------------------------------------------------
 
     def _read_current_files(self) -> dict[str, str]:
+        # Delegates to the Developer's own per-launch-type file list rather
+        # than a hardcoded web-only tuple -- otherwise a Tkinter (or any
+        # future non-web) Phase would get reviewed against empty HTML/CSS/
+        # JS stubs instead of the actual generated code.
         files: dict[str, str] = {}
-        for name in APP_FILES:
+        for name in self.developer._current_file_names():
             path = self.config.target_app_dir / name
             files[name] = path.read_text(encoding="utf-8") if path.exists() else ""
         return files
@@ -180,7 +183,7 @@ class OpenAIReviewerAgent(ReviewerAgent):
     def _build_user_message(self, phase: Phase, current_files: dict[str, str]) -> str:
         criteria = "\n".join(f"- {c}" for c in phase.success_criteria)
         parts = [f"## 성공 조건\n{criteria}", "\n## 코드"]
-        for name in APP_FILES:
+        for name in self.developer._current_file_names():
             content = current_files.get(name, "")
             if content:
                 parts.append(f"\n### {name}\n```\n{content}\n```")

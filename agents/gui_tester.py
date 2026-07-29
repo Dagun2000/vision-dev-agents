@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -173,6 +175,8 @@ class OpenAIGUITesterAgent(GUITesterAgent):
             return self._launch_native_exe(launch_config)
         if launch_config.launch_type == LaunchType.ELECTRON_APP:
             return self._launch_electron_app(launch_config)
+        if launch_config.launch_type == LaunchType.PYTHON_TKINTER:
+            return self._launch_python_tkinter(launch_config)
         raise ValueError(f"Unknown launch_type: {launch_config.launch_type!r}")
 
     def _next_port(self, base_port: int) -> int:
@@ -280,6 +284,56 @@ class OpenAIGUITesterAgent(GUITesterAgent):
         env = {k: v for k, v in os.environ.items() if k != "ELECTRON_RUN_AS_NODE"}
         command = [str(electron_bin), ".", f"--user-data-dir={profile_dir}"]
         window = open_native_app_maximized(command, cwd=str(self.config.target_app_dir), env=env)
+        return None, window
+
+    def _launch_python_tkinter(
+        self, launch_config: LaunchConfig
+    ) -> tuple[LocalStaticServer | None, BrowserWindow]:
+        """Launch the Tkinter app the Developer wrote into target-app/.
+
+        Unlike the web path (per-Phase port) or Electron (per-Phase
+        --user-data-dir), there's no framework/runtime-level flag that
+        gives Tkinter a fresh state for free -- see the "Native EXE
+        checklist" project note. Instead this relies on the generated
+        app itself cooperating: agents/developer.py's TKINTER_SYSTEM_PROMPT
+        requires main.py to support `python main.py --reset`, which must
+        wipe any persisted state and exit immediately without ever
+        creating a window. We run that as a blocking subprocess first,
+        then launch the real (windowed) process the normal way, reusing
+        the same generic open_native_app_maximized() used for Electron --
+        no Tkinter-specific window-finding logic needed.
+        """
+        main_py = self.config.target_app_dir / "main.py"
+        if not main_py.exists():
+            raise FileNotFoundError(
+                f"{main_py} not found -- expected agents/developer.py to have written it "
+                "before GUI verification"
+            )
+
+        python_bin = sys.executable
+        try:
+            reset_result = subprocess.run(
+                [python_bin, str(main_py), "--reset"],
+                cwd=str(self.config.target_app_dir),
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=15,
+            )
+            if reset_result.returncode != 0:
+                logger.warning(
+                    "GUI: launch_type=python_tkinter --reset exited non-zero (%d): %s",
+                    reset_result.returncode,
+                    reset_result.stderr.strip(),
+                )
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "GUI: launch_type=python_tkinter --reset timed out -- it may have "
+                "incorrectly called mainloop() instead of exiting immediately"
+            )
+
+        command = [python_bin, str(main_py)]
+        window = open_native_app_maximized(command, cwd=str(self.config.target_app_dir))
         return None, window
 
     # ---- step 4-3: full capture -> judge -> act -> verify loop ---------

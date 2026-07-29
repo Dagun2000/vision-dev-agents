@@ -29,15 +29,18 @@ class PhaseStatus(str, Enum):
 class LaunchType(str, Enum):
     """How the GUI Tester should launch target-app/ to verify it.
 
-    Only STATIC_WEB_SERVER is implemented right now (this project's target
-    is a static web app). NATIVE_EXE / ELECTRON_APP are placeholders for
-    generalizing the GUI Tester's execution layer to other app types later
-    -- see agents/gui_tester.py's launch_app() dispatcher.
+    STATIC_WEB_SERVER, ELECTRON_APP, and PYTHON_TKINTER are implemented --
+    see agents/gui_tester.py's launch_app() dispatcher. NATIVE_EXE stays an
+    unimplemented generic placeholder on purpose: native targets are added
+    one concrete framework at a time (own enum value, own prompt/schema),
+    never lumped into one generic native slot -- see the project memory
+    "Native EXE checklist" for the reasoning.
     """
 
     STATIC_WEB_SERVER = "static_web_server"
     NATIVE_EXE = "native_exe"
     ELECTRON_APP = "electron_app"
+    PYTHON_TKINTER = "python_tkinter"
 
 
 @dataclass
