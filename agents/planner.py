@@ -10,9 +10,8 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
-from openai import OpenAI
-
 from agents.base import PlannerAgent
+from agents.llm_client import TextPart, structured_completion
 from agents.models import Phase, PhaseStatus, ReplanContext
 from agents.report import PhaseReportRecord, render_report_markdown
 from agents.schemas import PlanSchema
@@ -71,13 +70,11 @@ SYSTEM_PROMPT = """\
 
 
 class OpenAIPlannerAgent(PlannerAgent):
-    def __init__(
-        self,
-        config: PipelineConfig | None = None,
-        client: OpenAI | None = None,
-    ) -> None:
+    """Named for historical reasons -- actually multi-provider via
+    agents/llm_client.py and the single LLM_PROVIDER setting."""
+
+    def __init__(self, config: PipelineConfig | None = None) -> None:
         self.config = config or PipelineConfig()
-        self.client = client or OpenAI(api_key=self.config.openai_api_key)
         self._report_requirement: str = ""
         self._report_started_at: datetime | None = None
         self._report_path: Path | None = None
@@ -86,17 +83,21 @@ class OpenAIPlannerAgent(PlannerAgent):
 
     def create_plan(self, requirement: str) -> list[Phase]:
         logger.info("Planner: requesting plan from model=%s", self.config.planner_model)
-        response = self.client.responses.parse(
-            model=self.config.planner_model,
-            input=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": requirement},
-            ],
-            text_format=PlanSchema,
+        lessons = self.load_lessons()
+        user_message = (
+            f"## 과거 실행에서 배운 것\n{lessons}\n\n## 요구사항\n{requirement}"
+            if lessons
+            else requirement
         )
-        plan = response.output_parsed
-        if plan is None or not plan.phases:
-            raise ValueError("Planner returned an empty or unparseable plan")
+        plan = structured_completion(
+            config=self.config,
+            model=self.config.planner_model,
+            system_prompt=SYSTEM_PROMPT,
+            parts=[TextPart(user_message)],
+            schema=PlanSchema,
+        )
+        if not plan.phases:
+            raise ValueError("Planner returned an empty plan")
 
         phases = [
             Phase(
@@ -127,17 +128,15 @@ class OpenAIPlannerAgent(PlannerAgent):
         the new Phase objects (the caller resumes from new_phases[0])."""
         logger.info("Planner: replanning phase=%s reason=%s", context.phase.id, context.reason)
         user_message = self._build_replan_message(context)
-        response = self.client.responses.parse(
+        plan = structured_completion(
+            config=self.config,
             model=self.config.planner_model,
-            input=[
-                {"role": "system", "content": REPLAN_SYSTEM_PROMPT},
-                {"role": "user", "content": user_message},
-            ],
-            text_format=PlanSchema,
+            system_prompt=REPLAN_SYSTEM_PROMPT,
+            parts=[TextPart(user_message)],
+            schema=PlanSchema,
         )
-        plan = response.output_parsed
-        if plan is None or not plan.phases:
-            raise ValueError("Planner returned an empty or unparseable replan")
+        if not plan.phases:
+            raise ValueError("Planner returned an empty replan")
 
         new_phases = [
             Phase(
@@ -292,3 +291,37 @@ class OpenAIPlannerAgent(PlannerAgent):
         )
         self._report_path.parent.mkdir(parents=True, exist_ok=True)
         self._report_path.write_text(markdown, encoding="utf-8")
+
+    # ---- long-term memory across runs (state/lessons.md) ------------------
+    #
+    # Deliberately best-effort and separate from plan.json: unlike plan.json
+    # (one run's state), this persists across every run so create_plan() can
+    # start from what past runs learned. Every entry point (both methods)
+    # swallows its own failures -- this feature existing, or not, or
+    # breaking, must never affect the pipeline's normal behavior.
+
+    def load_lessons(self) -> str:
+        try:
+            lessons_path = self.config.state_dir / "lessons.md"
+            if not lessons_path.exists():
+                return ""
+            return lessons_path.read_text(encoding="utf-8").strip()
+        except Exception as exc:
+            logger.warning("Planner: could not read lessons.md, ignoring (%s)", exc)
+            return ""
+
+    def append_lesson(self, phase: Phase, summary: str) -> None:
+        """Record one lesson-learned entry, called only when a replanned
+        Phase actually goes on to pass -- see PlanDrivenPipeline's replan
+        loop, which composes `summary` (already-labeled fields, one per
+        line) from the original failure reason and the approach that ended
+        up working. Structured Markdown, not prose: this is only ever read
+        back in by an LLM (create_plan()'s prompt), never a human."""
+        try:
+            self.config.state_dir.mkdir(parents=True, exist_ok=True)
+            lessons_path = self.config.state_dir / "lessons.md"
+            with lessons_path.open("a", encoding="utf-8") as f:
+                f.write(f"## Phase: {phase.title}\n{summary}\n\n")
+            logger.info("Planner: appended lesson for phase=%s to %s", phase.id, lessons_path)
+        except Exception as exc:
+            logger.warning("Planner: could not append lesson, ignoring (%s)", exc)

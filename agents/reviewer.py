@@ -20,10 +20,9 @@ from __future__ import annotations
 import json
 import logging
 
-from openai import OpenAI
-
 from agents.base import ReviewerAgent
 from agents.developer import OpenAIDeveloperAgent
+from agents.llm_client import TextPart, structured_completion
 from agents.models import DevResult, Phase, PhaseStatus, ReviewResult
 from agents.schemas import ReviewOutputSchema
 from orchestrator.config import PipelineConfig
@@ -55,15 +54,16 @@ SYSTEM_PROMPT = """\
 
 
 class OpenAIReviewerAgent(ReviewerAgent):
+    """Named for historical reasons -- actually multi-provider via
+    agents/llm_client.py and the single LLM_PROVIDER setting."""
+
     def __init__(
         self,
         config: PipelineConfig | None = None,
-        client: OpenAI | None = None,
         developer: OpenAIDeveloperAgent | None = None,
     ) -> None:
         self.config = config or PipelineConfig()
-        self.client = client or OpenAI(api_key=self.config.openai_api_key)
-        self.developer = developer or OpenAIDeveloperAgent(config=self.config, client=self.client)
+        self.developer = developer or OpenAIDeveloperAgent(config=self.config)
 
     # ---- ReviewerAgent interface (used by the orchestrator loop) ------
 
@@ -169,18 +169,13 @@ class OpenAIReviewerAgent(ReviewerAgent):
 
     def _review_files(self, phase: Phase, current_files: dict[str, str]) -> ReviewOutputSchema:
         user_message = self._build_user_message(phase, current_files)
-        response = self.client.responses.parse(
+        return structured_completion(
+            config=self.config,
             model=self.config.reviewer_model,
-            input=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_message},
-            ],
-            text_format=ReviewOutputSchema,
+            system_prompt=SYSTEM_PROMPT,
+            parts=[TextPart(user_message)],
+            schema=ReviewOutputSchema,
         )
-        result = response.output_parsed
-        if result is None:
-            raise ValueError("Reviewer LLM returned an unparseable response")
-        return result
 
     def _build_user_message(self, phase: Phase, current_files: dict[str, str]) -> str:
         criteria = "\n".join(f"- {c}" for c in phase.success_criteria)

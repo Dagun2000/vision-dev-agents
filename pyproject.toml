@@ -13,6 +13,12 @@ dependencies = [
     "numpy>=1.26.0",
     "pillow>=10.3.0",
     "streamlit>=1.38.0",
+    # Alternate GUI_TESTER_PROVIDER options for agents/gui/judgment.py --
+    # always installed so switching providers is just an .env change, no
+    # separate install step.
+    "anthropic>=0.40.0",
+    "google-genai>=0.3.0",
+    "ollama>=0.4.0",
 ]
 
 [dependency-groups]

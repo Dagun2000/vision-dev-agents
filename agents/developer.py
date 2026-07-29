@@ -18,9 +18,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from openai import OpenAI
-
 from agents.base import DeveloperAgent
+from agents.llm_client import TextPart, structured_completion
 from agents.models import DevResult, LaunchConfig, Phase, PhaseStatus
 from agents.schemas import DevOutputSchema
 from orchestrator.config import ROOT_DIR, PipelineConfig
@@ -62,13 +61,11 @@ class DeveloperLintError(RuntimeError):
 
 
 class OpenAIDeveloperAgent(DeveloperAgent):
-    def __init__(
-        self,
-        config: PipelineConfig | None = None,
-        client: OpenAI | None = None,
-    ) -> None:
+    """Named for historical reasons -- actually multi-provider via
+    agents/llm_client.py and the single LLM_PROVIDER setting."""
+
+    def __init__(self, config: PipelineConfig | None = None) -> None:
         self.config = config or PipelineConfig()
-        self.client = client or OpenAI(api_key=self.config.openai_api_key)
 
     # ---- DeveloperAgent interface (used by the orchestrator loop) -----
 
@@ -211,18 +208,13 @@ class OpenAIDeveloperAgent(DeveloperAgent):
         review_issues: list[str] | None = None,
     ) -> DevOutputSchema:
         user_message = self._build_user_message(phase, current_files, lint_feedback, review_issues)
-        response = self.client.responses.parse(
+        return structured_completion(
+            config=self.config,
             model=self.config.developer_model,
-            input=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_message},
-            ],
-            text_format=DevOutputSchema,
+            system_prompt=SYSTEM_PROMPT,
+            parts=[TextPart(user_message)],
+            schema=DevOutputSchema,
         )
-        result = response.output_parsed
-        if result is None:
-            raise ValueError("Developer LLM returned an unparseable response")
-        return result
 
     def _build_user_message(
         self,

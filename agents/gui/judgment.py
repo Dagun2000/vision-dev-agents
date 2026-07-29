@@ -1,23 +1,27 @@
 """Vision-based judgment for the GUI Tester agent.
 
 Pure judgment: given a labeled (Set-of-marks) screenshot and the current
-Phase's success_criteria, ask the Vision model to read the screenshot
+Phase's success_criteria, ask a vision-capable model to read the screenshot
 itself -- no separate OCR text list is provided -- and decide the next
-action, or declare success/failure. This module must never touch the OS,
-a browser, or the DOM; see agents/gui/execution.py for that. It only
-knows images and the Vision model.
+action, or declare success/failure. This module must never touch the OS, a
+browser, or the DOM; see agents/gui/execution.py for that. It only knows
+images and the model.
+
+The actual provider call goes through agents/llm_client.py (shared by all
+four agents, picked by the single LLM_PROVIDER setting) -- this module just
+builds the prompt/image parts and asks for GUIActionSchema back.
 """
 
 from __future__ import annotations
 
-import base64
 import io
 import logging
 
-from openai import OpenAI
 from PIL import Image
 
+from agents.llm_client import ImagePart, TextPart, structured_completion
 from agents.schemas import GUIActionSchema
+from orchestrator.config import PipelineConfig
 
 logger = logging.getLogger("pipeline")
 
@@ -42,19 +46,13 @@ SYSTEM_PROMPT = """\
 """
 
 
-def _encode_png(image: Image.Image) -> str:
+def _encode_png(image: Image.Image) -> bytes:
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
-    return base64.b64encode(buffer.getvalue()).decode("ascii")
+    return buffer.getvalue()
 
 
-def decide_next_action(
-    client: OpenAI,
-    model: str,
-    labeled_screenshot: Image.Image,
-    success_criteria: list[str],
-    step_log: list[str] | None = None,
-) -> GUIActionSchema:
+def _build_user_text(success_criteria: list[str], step_log: list[str] | None) -> str:
     criteria_text = "\n".join(f"- {c}" for c in success_criteria)
     parts = [f"## 성공 조건\n{criteria_text}"]
     if step_log:
@@ -62,33 +60,29 @@ def decide_next_action(
         parts.append(f"\n## 지금까지 수행한 액션\n{history}")
     else:
         parts.append("\n## 지금까지 수행한 액션\n(아직 없음 -- 이번이 첫 액션)")
+    return "\n".join(parts)
 
-    user_text = "\n".join(parts)
-    image_b64 = _encode_png(labeled_screenshot)
 
-    response = client.responses.parse(
-        model=model,
-        input=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "input_text", "text": user_text},
-                    {
-                        "type": "input_image",
-                        "image_url": f"data:image/png;base64,{image_b64}",
-                    },
-                ],
-            },
-        ],
-        text_format=GUIActionSchema,
+def decide_next_action(
+    config: PipelineConfig,
+    labeled_screenshot: Image.Image,
+    success_criteria: list[str],
+    step_log: list[str] | None = None,
+) -> GUIActionSchema:
+    user_text = _build_user_text(success_criteria, step_log)
+    parts = [TextPart(user_text), ImagePart(_encode_png(labeled_screenshot))]
+
+    result = structured_completion(
+        config=config,
+        model=config.gui_tester_model,
+        system_prompt=SYSTEM_PROMPT,
+        parts=parts,
+        schema=GUIActionSchema,
     )
-    result = response.output_parsed
-    if result is None:
-        raise ValueError("GUI Tester Vision model returned an unparseable response")
-
     logger.info(
-        "GUI: vision decided action=%s target=%s text=%r reasoning=%s",
+        "GUI: vision(%s/%s) decided action=%s target=%s text=%r reasoning=%s",
+        config.llm_provider,
+        config.gui_tester_model,
         result.action,
         result.target_element,
         result.text,

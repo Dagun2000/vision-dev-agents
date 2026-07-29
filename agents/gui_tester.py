@@ -30,7 +30,6 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
-from openai import OpenAI
 from PIL import Image
 
 from agents.base import GUITesterAgent
@@ -73,9 +72,12 @@ LOCAL_DIFF_PADDING_PX = 6
 
 
 class OpenAIGUITesterAgent(GUITesterAgent):
-    def __init__(self, config: PipelineConfig | None = None, client: OpenAI | None = None) -> None:
+    """Named for historical reasons (this whole pipeline's other three
+    agents are OpenAI-only) -- its own vision judgment call is actually
+    multi-provider, see agents/gui/judgment.py and config.gui_tester_provider."""
+
+    def __init__(self, config: PipelineConfig | None = None) -> None:
         self.config = config or PipelineConfig()
-        self.client = client or OpenAI(api_key=self.config.openai_api_key)
         self._last_window: BrowserWindow | None = None
         self._launch_count = 0
         enable_windows_dpi_awareness()
@@ -152,8 +154,7 @@ class OpenAIGUITesterAgent(GUITesterAgent):
         raw_path, labeled_path, boxes, labeled_image, _window = self.capture_labeled_screenshot()
 
         action = decide_next_action(
-            client=self.client,
-            model=self.config.gui_tester_model,
+            config=self.config,
             labeled_screenshot=labeled_image,
             success_criteria=phase.success_criteria,
             step_log=step_log,
@@ -278,8 +279,7 @@ class OpenAIGUITesterAgent(GUITesterAgent):
                     prompt_history.append(note_for_model)
 
                 action = decide_next_action(
-                    client=self.client,
-                    model=self.config.gui_tester_model,
+                    config=self.config,
                     labeled_screenshot=labeled_image,
                     success_criteria=phase.success_criteria,
                     step_log=prompt_history,

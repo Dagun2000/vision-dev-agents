@@ -159,13 +159,21 @@ class PlanDrivenPipeline:
         replan_round = 0
         human_feedback: str | None = None
         followups: list[str] = []
+        # Captured before any replan splices phase_id out of plan.json, so
+        # there's still something to describe "the original approach" with
+        # once a replanned phase succeeds -- see _record_lesson().
+        original_phase = self._load_phase(phase_id)
+        last_reason: str | None = None
 
         while True:
             ok = self.run_phase(current_phase_id)
             if ok:
+                if replan_round > 0:
+                    self._record_lesson(original_phase, last_reason, current_phase_id)
                 return "success", followups
 
             reason = self._describe_failure(current_phase_id)
+            last_reason = reason
 
             if replan_round < self.config.max_replan_attempts:
                 replan_round += 1
@@ -210,6 +218,21 @@ class PlanDrivenPipeline:
                 new_phase.id, replanned_from=phase_id, replan_reason=context.reason
             )
         return [p.id for p in new_phases]
+
+    def _record_lesson(self, original_phase: Phase, reason: str | None, new_phase_id: str) -> None:
+        """Best-effort: called only once a replanned Phase actually passes.
+        planner.append_lesson() already swallows its own failures, so this
+        never risks the pipeline's own success/failure over a logging step."""
+        new_phase = self._load_phase(new_phase_id)
+        # Labeled fields rather than one flowing sentence -- this is only
+        # ever read back in by an LLM (create_plan()'s prompt), not a
+        # human, so structured beats grammatically smooth.
+        summary = (
+            f"- 시도한 접근: {original_phase.description}\n"
+            f"- 실패 원인: {reason or '반복 실패'}\n"
+            f"- 성공한 접근: {new_phase.title} -- {new_phase.description}"
+        )
+        self.planner.append_lesson(original_phase, summary)
 
     def _describe_failure(self, phase_id: str) -> str:
         phase_dict = self._load_phase_dict(phase_id)
@@ -278,7 +301,7 @@ class PlanDrivenPipeline:
             status = self._load_phase_dict(phase_id)["status"]
 
         if status == PhaseStatus.DEV_DONE.value:
-            if self.config.debug_inject_bug and phase_id == self.config.debug_inject_phase_id:
+            if self.config.debug_inject_bug and phase_id in self.config.debug_inject_phase_ids:
                 self._apply_debug_bug(phase_id)
                 review_skipped_debug = True
             else:
@@ -316,6 +339,16 @@ class PlanDrivenPipeline:
         app_js_path = self.config.target_app_dir / "app.js"
         original = app_js_path.read_text(encoding="utf-8")
         injected = inject_bug(phase_id, original)
+        if injected == original:
+            logger.warning(
+                "PlanPipeline: phase=%s debug bug injection was a no-op -- this "
+                "phase's app.js didn't match the injector's expected code pattern "
+                "(e.g. no add-Todo submit handler yet), so Reviewer is still being "
+                "skipped but nothing was actually broken. GUI verification will "
+                "likely just pass. Pick a DEBUG_INJECT_PHASE_ID phase that actually "
+                "implements the add flow.",
+                phase_id,
+            )
         app_js_path.write_text(injected, encoding="utf-8")
 
         # Deliberately skip Reviewer -- go straight to GUI verification as

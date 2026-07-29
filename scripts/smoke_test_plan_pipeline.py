@@ -48,9 +48,9 @@ def main() -> None:
     enable_windows_dpi_awareness()
 
     config = PipelineConfig()
-    print(f"DEBUG_INJECT_BUG={config.debug_inject_bug} DEBUG_INJECT_PHASE_ID={config.debug_inject_phase_id}")
+    print(f"DEBUG_INJECT_BUG={config.debug_inject_bug} DEBUG_INJECT_PHASE_ID={config.debug_inject_phase_ids}")
     print(f"MAX_GUI_TEST_RETRIES={config.max_gui_test_retries} MAX_REPLAN_ATTEMPTS={config.max_replan_attempts}")
-    if not config.debug_inject_bug or not config.debug_inject_phase_id:
+    if not config.debug_inject_bug or not config.debug_inject_phase_ids:
         raise SystemExit("Set DEBUG_INJECT_BUG=true and DEBUG_INJECT_PHASE_ID in .env before running this.")
 
     planner = OpenAIPlannerAgent(config=config)
@@ -63,7 +63,7 @@ def main() -> None:
         config=config,
     )
 
-    phase_id = config.debug_inject_phase_id
+    phase_id = next(iter(config.debug_inject_phase_ids))
     report_path = planner.start_report(REQUIREMENT)
     try:
         outcome = pipeline.run_phase_with_replanning(phase_id)

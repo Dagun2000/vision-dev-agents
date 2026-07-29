@@ -57,9 +57,7 @@ def disable_add_on_submit(app_js: str) -> tuple[str, str]:
         prevent_default_match.end() if prevent_default_match else handler_match.end()
     )
     injected = (
-        app_js[:insertion_point]
-        + "\n    return; // [DEBUG BUG INJECTED] Todo 추가 로직 무력화"
-        + app_js[insertion_point:]
+        app_js[:insertion_point] + "\n    return;" + app_js[insertion_point:]
     )
     description = "Todo 추가 submit 핸들러를 (preventDefault 이후) 즉시 return하도록 무력화 -- 추가 버튼을 눌러도 목록에 아무 변화 없음"
     return injected, description
@@ -71,6 +69,16 @@ def add_uses_placeholder_text(app_js: str) -> tuple[str, str]:
     DOES appear -- this isn't a "nothing happens" bug -- but its content
     is wrong, so only a Vision model actually reading the result (not a
     pixel-diff check) can catch it.
+
+    Deliberately does *not* touch the value-read line itself (that would
+    also break the empty-input check right after it, since it typically
+    tests the same variable for emptiness -- feeding it the placeholder,
+    which is never empty, would make empty-input submissions silently
+    "succeed" too, an entirely different bug from the one intended here).
+    Instead, the swap is inserted right before the array .push() call, so
+    it only fires *after* the real empty check already passed on the real
+    value: typing something still shows the wrong (placeholder) text, but
+    submitting empty is still correctly blocked.
 
     Matches both `var text = todoInput.value.trim();` and a plain
     `text = todoInput.value.trim();` (declared earlier), since the
@@ -84,23 +92,39 @@ def add_uses_placeholder_text(app_js: str) -> tuple[str, str]:
         return app_js, "submit 이벤트 핸들러를 찾지 못해 버그를 주입하지 못함 (코드 구조가 예상과 다름)"
 
     value_read_pattern = re.compile(
-        r"((?:var|let|const)\s+)?(\w+)\s*=\s*(\w+)\s*\.\s*value\s*(?:\.\s*trim\s*\(\s*\)\s*)?;"
+        r"(?:var|let|const)?\s*(\w+)\s*=\s*(\w+)\s*\.\s*value\s*(?:\.\s*trim\s*\(\s*\)\s*)?;"
     )
     value_match = value_read_pattern.search(app_js, handler_match.end())
     if not value_match:
         return app_js, "입력값을 읽는 코드를 찾지 못해 버그를 주입하지 못함 (코드 구조가 예상과 다름)"
 
-    keyword_part = value_match.group(1) or ""
-    text_var = value_match.group(2)
-    input_var = value_match.group(3)
-    replacement = (
-        f"{keyword_part}{text_var} = {input_var}.placeholder; "
-        "// [DEBUG BUG INJECTED] 입력값 대신 placeholder 텍스트 사용"
+    text_var = value_match.group(1)
+    input_var = value_match.group(2)
+
+    push_pattern = re.compile(r"\.push\s*\(")
+    push_match = push_pattern.search(app_js, value_match.end())
+    if not push_match:
+        return app_js, "새 Todo를 배열에 추가하는 push() 호출을 찾지 못해 버그를 주입하지 못함 (코드 구조가 예상과 다름)"
+
+    # Insert as a whole new line right before the push call's line, matching
+    # its indentation, so it runs after whatever empty-check sits between
+    # the value read and the push (i.e. only once we know something was
+    # actually typed).
+    line_start = app_js.rfind("\n", 0, push_match.start()) + 1
+    content_start = line_start
+    while content_start < len(app_js) and app_js[content_start] in " \t":
+        content_start += 1
+    indent = app_js[line_start:content_start]
+    injected = (
+        app_js[:line_start]
+        + f"{indent}{text_var} = {input_var}.placeholder;\n"
+        + app_js[line_start:]
     )
-    injected = app_js[: value_match.start()] + replacement + app_js[value_match.end() :]
     description = (
-        f"Todo 추가 시 실제 입력값 대신 입력창의 placeholder(안내 문구) 텍스트가 사용되도록 변경 "
-        f"({input_var}.value -> {input_var}.placeholder) -- 목록에는 항목이 추가되지만 내용이 틀림"
+        f"Todo 추가 직전(빈 입력 검증은 통과한 뒤)에 실제 입력값 대신 입력창의 "
+        f"placeholder(안내 문구) 텍스트로 덮어쓰도록 변경 ({input_var}.value -> "
+        f"{input_var}.placeholder) -- 빈 입력은 여전히 정상적으로 막히고, 뭔가 입력했을 "
+        f"때만 목록에 엉뚱한 내용으로 추가됨"
     )
     return injected, description
 
