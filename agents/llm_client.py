@@ -15,14 +15,46 @@ level, so the cost of importing all four is only paid once actually used.
 from __future__ import annotations
 
 import base64
+import logging
+import time
 from dataclasses import dataclass
 from typing import TypeVar
 
+import anthropic
+import httpx
+import openai
 from pydantic import BaseModel
 
 from orchestrator.config import PipelineConfig
 
 T = TypeVar("T", bound=BaseModel)
+
+logger = logging.getLogger("pipeline")
+
+# A single dropped connection used to kill an entire multi-minute,
+# multi-phase pipeline run outright -- confirmed real (openai's
+# APIConnectionError renders as literally "Connection error.", an exact
+# match for a run that had already passed two Phases before dying on this).
+# Retried with backoff; NOT retried: anything that isn't transient (bad
+# API key, invalid request, schema mismatch, etc.) -- retrying those would
+# just burn time and money without ever succeeding.
+RETRYABLE_EXCEPTIONS = (
+    openai.APIConnectionError,
+    openai.APITimeoutError,
+    openai.InternalServerError,
+    openai.RateLimitError,
+    anthropic.APIConnectionError,
+    anthropic.APITimeoutError,
+    anthropic.InternalServerError,
+    anthropic.RateLimitError,
+    httpx.TransportError,  # covers ConnectError/ReadTimeout/etc. -- also
+    # what gemini/ollama's own httpx-based clients raise for the same
+    # class of transient network failure.
+    ConnectionError,
+    TimeoutError,
+)
+MAX_LLM_RETRIES = 3
+RETRY_BACKOFF_SECONDS = 2.0
 
 
 @dataclass
@@ -62,7 +94,30 @@ def structured_completion(
         raise ValueError(
             f"Unknown LLM_PROVIDER={provider!r} (expected one of: {', '.join(dispatch)})"
         )
-    return call(config, model, system_prompt, parts, schema)
+
+    for attempt in range(1, MAX_LLM_RETRIES + 1):
+        try:
+            return call(config, model, system_prompt, parts, schema)
+        except RETRYABLE_EXCEPTIONS as exc:
+            if attempt == MAX_LLM_RETRIES:
+                logger.error(
+                    "LLM: %s call failed after %d attempts (%s) -- giving up",
+                    provider,
+                    MAX_LLM_RETRIES,
+                    exc,
+                )
+                raise
+            wait_seconds = RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1))
+            logger.warning(
+                "LLM: %s call failed (attempt %d/%d): %s -- retrying in %.0fs",
+                provider,
+                attempt,
+                MAX_LLM_RETRIES,
+                exc,
+                wait_seconds,
+            )
+            time.sleep(wait_seconds)
+    raise AssertionError("unreachable")  # loop always returns or raises
 
 
 def _openai(

@@ -79,5 +79,14 @@ class PipelineConfig:
     logs_dir: Path = LOGS_DIR
     state_file: Path = STATE_DIR / "pipeline_state.json"
     plan_file: Path = STATE_DIR / "plan.json"
+    # Persists the GUI Tester's session-level launch choice (port /
+    # Electron profile dir / whether Tkinter's --reset already ran) to
+    # disk, not just in memory -- a resumed run (new Python process,
+    # existing plan.json) would otherwise always look like "the first
+    # launch of a new session" and re-trigger a fresh reset, wiping
+    # exactly the state a resume is supposed to preserve. Cleared by the
+    # same reset routine that clears plan.json (a genuinely fresh run
+    # must not inherit a stale session).
+    gui_session_file: Path = STATE_DIR / "gui_session.json"
     screenshots_dir: Path = LOGS_DIR / "screenshots"
     requirement_file: Path = CONFIG_DIR / "requirement.txt"

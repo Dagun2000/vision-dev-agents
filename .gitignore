@@ -189,6 +189,12 @@ cython_debug/
 /logs/screenshots/*.png
 !/logs/screenshots/.gitkeep
 
+# Electron's own Chromium user-data-dir (leveldb, GPU/Dawn cache,
+# SharedStorage, ...) -- runtime browser profile data recreated every
+# Electron launch, not source. Was committed before this rule existed,
+# so it's also removed from tracking (git rm -r --cached) alongside this.
+/logs/electron_profiles/
+
 # Generated app output -- overwritten by every pipeline run, not source
 /target-app/*
 !/target-app/.gitkeep

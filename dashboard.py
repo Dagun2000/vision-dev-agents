@@ -47,7 +47,7 @@ POLL_INTERVAL_SECONDS = 1.5
 LAUNCH_TYPE_LABELS: dict[LaunchType, str] = {
     LaunchType.STATIC_WEB_SERVER: "웹 앱 (정적 웹, HTML/CSS/JS)",
     LaunchType.ELECTRON_APP: "Electron 앱 (데스크톱)",
-    LaunchType.PYTHON_TKINTER: "Python Tkinter 앱 (데스크톱, POC)",
+    LaunchType.PYTHON_TKINTER: "Python Tkinter 앱 (데스크톱)",
     LaunchType.NATIVE_EXE: "데스크톱 앱 (Native EXE) -- 아직 미지원",
 }
 UNSUPPORTED_LAUNCH_TYPES = {LaunchType.NATIVE_EXE}

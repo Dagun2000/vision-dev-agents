@@ -42,6 +42,73 @@ ELECTRON_FILES = ("main.js", "package.json")
 # unlike Electron which still renders index.html.
 TKINTER_FILES = ("main.py",)
 
+# Shared across all launch-type prompts: the GUI Tester's Set-of-marks
+# detection (agents/gui/detection.py) only finds elements with a visible
+# stroke (border) or fill (background) -- plain, unstyled text (including
+# a bare hyperlink-style "sign up" link with no button chrome) is
+# invisible to it by design (same reason plain headings/captions never get
+# boxed). Confirmed causing a real GUI-verification failure: a
+# "회원가입" screen-switch link with no border/background couldn't be
+# clicked at all -- the model could see it but had no numbered element to
+# target.
+#
+# A second, subtler variant confirmed later the same session: a "로그아웃"
+# button *did* have a fill color (a pale blue, clearly a different color
+# to a human eye) but no border, and STILL wasn't detected -- its
+# grayscale value was only 10 levels different from the white background
+# behind it (245 vs 255), and Canny edge detection runs on grayscale only,
+# discarding hue/saturation entirely. Confirmed by direct pixel math: a
+# properly-detected button on the same screen had a grayscale delta of
+# 130. Canny's low threshold here is 20, so a ~10 delta is just invisible,
+# no matter how visually distinct the color looks to a person. Fill-color
+# contrast alone isn't a reliable rule to give an LLM (it can't compute
+# grayscale deltas), so the rule below requires a real border line
+# instead, which doesn't depend on guessing whether a chosen fill color
+# happens to be dark/saturated enough.
+#
+# Every prompt below must repeat this rule, not just the ones that
+# happened to hit it, since any of them could generate a pastel-filled or
+# plain-text "link"/button for navigation or a secondary action.
+CLICKABLE_ELEMENT_VISIBILITY_RULE = """\
+- **중요**: 클릭해서 어떤 동작을 일으키는 요소는 버튼이든, 화면 전환
+  링크든("회원가입하기", "로그인 화면으로", "로그아웃" 등) 전부 **눈에
+  보이는 테두리선(border)을 반드시 넣으세요.** 배경색만 다르게 주고
+  테두리를 생략하지 마세요 -- 옅은 파스텔톤 배경색(예: 흰 배경 위의
+  연한 하늘색)은 사람 눈에는 구분되어 보여도 화면 검증 시스템은 흑백
+  명암 차이만으로 요소를 인식하기 때문에, 배경과 명암(밝기) 차이가
+  작으면 배경색이 있어도 인식하지 못합니다. 테두리선은 배경과 확실히
+  구분되는 진한 색(예: 흰 배경이면 회색 이상 진하기의 테두리)으로
+  그리세요. 밑줄만 있거나 배경/테두리가 전혀 없는 순수 텍스트 링크는
+  절대 클릭할 방법이 없습니다."""
+
+# Confirmed real failure on a Kanban board: dragging a card onto a column
+# repeatedly landed on the column's small title-text strip instead of
+# actually moving the card, because the column's title had a border/
+# underline but the column's actual card-list *body* (the real drop
+# target the JS listens on) had none -- so Set-of-marks only ever boxed
+# the tiny title area, not the full droppable region. Same underlying
+# principle as CLICKABLE_ELEMENT_VISIBILITY_RULE (no border = invisible
+# to detection), but specifically about drop *targets*, which need their
+# whole area boxed, not just a label inside them.
+DRAG_DROP_VISIBILITY_RULE = """\
+- **드래그 앤 드롭 UI가 있다면, 다음 두 가지 모두에 테두리가 필요합니다:**
+  1. **드래그되는 카드/항목 자체** -- 카드 전체(제목, 내용, 버튼을 포함한
+     전체 영역)를 감싸는 눈에 보이는 테두리를 넣으세요. 카드 안의 작은
+     아이콘이나 손잡이(drag handle)에만 테두리를 주고 카드 본문에는
+     테두리가 없으면, 화면 검증 시스템이 카드 전체를 하나의 요소로
+     인식하지 못하거나 엉뚱한 부분(예: 손잡이 아이콘만)을 드래그 시작점으로
+     잡게 되어 카드 이동 자체가 제대로 실행되지 않습니다.
+  2. **카드를 놓을 수 있는 대상 영역** (예: 칸반보드의 각 컬럼 전체 --
+     카드 목록이 들어가는 영역) -- 카드가 하나도 없어 비어 있을 때조차
+     그 영역 전체를 감싸는 눈에 보이는 테두리를 넣으세요. 컬럼 제목
+     텍스트 주변에만 작은 테두리나 밑줄이 있고 그 아래 실제 카드가
+     들어갈 넓은 영역에는 테두리가 없으면, 화면 검증 시스템은 그 작은
+     제목 부분만 하나의 요소로 인식하게 되어 카드를 그 위로 드래그해도
+     실제 드롭 대상 영역 밖에 놓이게 되고 이동이 실패합니다.
+  두 경우 모두 CLICKABLE_ELEMENT_VISIBILITY 규칙과 같은 이유입니다:
+  테두리가 없으면 화면 검증 시스템은 그 요소의 진짜 크기와 위치를 알 수
+  없습니다."""
+
 SYSTEM_PROMPT = """\
 당신은 멀티 에이전트 자동 개발 파이프라인의 개발자(Developer) 에이전트입니다.
 목표는 localStorage만 사용하는 순수 정적 프론트엔드 Todo 리스트 앱을
@@ -53,18 +120,31 @@ index.html / style.css / app.js 세 파일로 점진적으로 완성하는 것�
 - 이번에 주어지는 "현재 파일 내용"은 이전 Phase까지 누적된 결과물입니다.
   이번 Phase의 요구사항만큼만 이어서 추가/수정하고, 기존에 이미 동작하던
   기능을 망가뜨리지 마세요.
+- **매우 중요**: localStorage에 저장할 때 사용하는 키 이름과 저장된 값의
+  JSON 구조(예: 계정을 담는 객체 이름, 로그인 세션을 나타내는 키 이름
+  등)를 "현재 파일 내용"에 이미 정의된 그대로 유지하세요. 코드가 더
+  깔끔해 보인다는 이유로 기존 localStorage 키나 데이터 구조를 바꾸지
+  마세요. 바꾸면 그동안 저장된 계정/데이터를 새 코드가 더 이상 읽지
+  못해, 이전 Phase에서 이미 검증된 로그인 상태와 데이터가 전부 사라진
+  것처럼 보이는 심각한 회귀가 발생합니다 (특히 "새로고침해도 로그인
+  상태가 유지된다" 같은 조건이 거짓으로 실패하게 됩니다). 새로운 정보를
+  저장해야 한다면 기존 구조에 키/필드를 추가만 하세요.
 - 응답에는 세 파일의 "전체" 내용을 다시 작성해서 반환하세요 (diff가 아닙니다).
   변경이 필요 없는 파일도 전체 내용을 그대로 반환하세요.
 - app.js는 브라우저에 <script>로 그대로 로드되는 스크립트입니다. 전역
   window/document/localStorage/console만 사용할 수 있고, import/require,
   module 문법은 금지합니다.
 - 이전 시도의 eslint 오류가 주어지면 그 오류를 반드시 고치세요.
+{visibility_rule}
+{drag_drop_rule}
 - launch_config는 이 앱을 어떻게 실행해서 검증할지에 대한 정보입니다.
   launch_type은 항상 "static_web_server"로 고정하세요 (다른 값은 아직
   지원되지 않습니다). launch_command는 "python -m http.server 8000"과
   같은 형태로, entry_url은 "http://localhost:8000/index.html"과 같은
   형태로 작성하세요.
-"""
+""".format(
+    visibility_rule=CLICKABLE_ELEMENT_VISIBILITY_RULE, drag_drop_rule=DRAG_DROP_VISIBILITY_RULE
+)
 
 ELECTRON_SYSTEM_PROMPT = """\
 당신은 멀티 에이전트 자동 개발 파이프라인의 개발자(Developer) 에이전트입니다.
@@ -80,6 +160,15 @@ index.html / style.css / app.js / main.js / package.json 다섯 파일로
 - 이번에 주어지는 "현재 파일 내용"은 이전 Phase까지 누적된 결과물입니다.
   이번 Phase의 요구사항만큼만 이어서 추가/수정하고, 기존에 이미 동작하던
   기능을 망가뜨리지 마세요.
+- **매우 중요**: localStorage에 저장할 때 사용하는 키 이름과 저장된 값의
+  JSON 구조(예: 계정을 담는 객체 이름, 로그인 세션을 나타내는 키 이름
+  등)를 "현재 파일 내용"에 이미 정의된 그대로 유지하세요. 코드가 더
+  깔끔해 보인다는 이유로 기존 localStorage 키나 데이터 구조를 바꾸지
+  마세요. 바꾸면 그동안 저장된 계정/데이터를 새 코드가 더 이상 읽지
+  못해, 이전 Phase에서 이미 검증된 로그인 상태와 데이터가 전부 사라진
+  것처럼 보이는 심각한 회귀가 발생합니다 (특히 "새로고침해도 로그인
+  상태가 유지된다" 같은 조건이 거짓으로 실패하게 됩니다). 새로운 정보를
+  저장해야 한다면 기존 구조에 키/필드를 추가만 하세요.
 - 응답에는 다섯 파일의 "전체" 내용을 다시 작성해서 반환하세요 (diff가
   아닙니다). 변경이 필요 없는 파일도 전체 내용을 그대로 반환하세요.
 - main.js는 Electron 메인 프로세스 진입점입니다. `app.whenReady()` 이후
@@ -91,22 +180,62 @@ index.html / style.css / app.js / main.js / package.json 다섯 파일로
   -- 여기에 적어도 실제로 설치되지 않습니다).
 - 이전 시도의 eslint 오류가 주어지면 그 오류를 반드시 고치세요 (app.js만
   검사 대상입니다).
+{visibility_rule}
+{drag_drop_rule}
 - launch_config.launch_type은 항상 "electron_app"으로 고정하세요.
   launch_command/entry_url은 실제 실행에는 쓰이지 않으니 대략적인 설명만
   적으면 됩니다.
-"""
+""".format(
+    visibility_rule=CLICKABLE_ELEMENT_VISIBILITY_RULE, drag_drop_rule=DRAG_DROP_VISIBILITY_RULE
+)
 
 TKINTER_SYSTEM_PROMPT = """\
 당신은 멀티 에이전트 자동 개발 파이프라인의 개발자(Developer) 에이전트입니다.
-목표는 Python 표준 라이브러리 tkinter만 사용하는 데스크톱 GUI 앱을 main.py
-한 파일로 점진적으로 완성하는 것입니다.
+목표는 customtkinter 라이브러리를 사용하는 데스크톱 GUI 앱을 main.py 한
+파일로 점진적으로 완성하는 것입니다.
 
 규칙:
-- Python 표준 라이브러리(tkinter, json, pathlib, sys 등)만 사용하세요. pip로
-  별도 설치가 필요한 외부 패키지는 사용할 수 없습니다.
+- GUI는 반드시 customtkinter(`import customtkinter as ctk`)로 작성하세요.
+  일반 tkinter의 `tk.Button`/`tk.Label`/`tk.Entry` 등이 아니라
+  `ctk.CTkButton`/`ctk.CTkLabel`/`ctk.CTkEntry` 등 customtkinter의 위젯을
+  사용하세요. 창 생성도 `tk.Tk()`가 아니라 `ctk.CTk()`를 쓰세요.
+  `ctk.set_appearance_mode("light")`와
+  `ctk.set_default_color_theme("blue")`를 앱 시작 시 설정하세요.
+  customtkinter와 표준 라이브러리(json, pathlib, sys 등) 외의 외부 패키지는
+  사용할 수 없습니다.
+- **중요**: 창(`ctk.CTk` 인스턴스)에 `self.resizable(False, False)`를
+  호출하지 마세요. 창 크기를 고정하면 Windows에서 최대화 버튼/기능 자체가
+  비활성화되어, 화면 검증 시스템이 창을 최대화하려는 시도가 조용히
+  무시되고 작은 창 그대로 남습니다 (에러 없이 그냥 실패). 창 크기 조절은
+  항상 가능한 상태로 두세요 (`resizable()`을 아예 호출하지 않거나
+  `self.resizable(True, True)`로 두세요). 최소 크기를 지정하고 싶으면
+  `self.minsize(...)`만 쓰고 `resizable`은 건드리지 마세요.
+- **중요**: `ctk.CTk`를 상속하는 클래스(메인 윈도우)에서 인스턴스 속성 이름으로
+  `self.state`를 절대 쓰지 마세요. `CTk`/`Tk`에는 이미 내장 `state()`
+  메서드가 있고, Windows에서는 `mainloop()` 시작 시 customtkinter가 내부적으로
+  이 메서드를 호출합니다 (타이틀바 색상 처리용). `self.state = ...`로
+  덮어쓰면 `mainloop()` 호출 시 `TypeError: 'dict' object is not callable`로
+  즉시 크래시합니다. 앱 데이터를 저장할 속성 이름은 `self.app_state`,
+  `self.data` 등 다른 이름을 사용하세요.
+- **중요**: `ctk.CTkEntry`에는 `selection_range()` 메서드가 없습니다 (표준
+  `tkinter.Entry`에 있는 메서드이지만 `CTkEntry`는 이를 상속하지 않습니다).
+  텍스트를 전체 선택하려는 의도로 이 메서드를 호출하면
+  `AttributeError`가 발생합니다. 입력 필드 텍스트를 전체 선택할 필요가
+  있다면 `select_range(0, "end")`를 대신 사용하거나, 굳이 필요하지
+  않다면 아예 호출하지 마세요.
 - 이번에 주어지는 "현재 파일 내용"은 이전 Phase까지 누적된 결과물입니다.
   이번 Phase의 요구사항만큼만 이어서 추가/수정하고, 기존에 이미 동작하던
   기능을 망가뜨리지 마세요.
+- **매우 중요**: 상태 저장 파일의 파일명과 그 파일의 최상위 JSON 키 구조
+  (예: 계정을 담는 딕셔너리 이름, 로그인 세션을 나타내는 키 이름 등)를
+  "현재 파일 내용"에 이미 정의된 그대로 유지하세요. 코드가 더 깔끔해
+  보인다는 이유로 기존 상태 파일명이나 최상위 키 이름/구조를 바꾸지
+  마세요. 파일명이나 스키마를 바꾸면 그동안 저장된 계정/보드/로그인
+  세션 데이터를 새 코드가 더 이상 읽지 못해, 이전 Phase에서 이미 검증된
+  로그인 상태와 데이터가 전부 사라진 것처럼 보이는 심각한 회귀가
+  발생합니다 (특히 "새로고침해도 로그인 상태가 유지된다" 같은 조건이
+  거짓으로 실패하게 됩니다). 새로운 정보를 저장해야 한다면 기존 구조에
+  키/필드를 추가만 하세요.
 - 응답에는 main.py의 "전체" 내용을 다시 작성해서 반환하세요 (diff가
   아닙니다).
 - 상태를 저장해야 한다면 스크립트와 같은 디렉터리의 JSON 파일(예:
@@ -116,19 +245,26 @@ TKINTER_SYSTEM_PROMPT = """\
   지원해야 합니다. `python main.py --reset`으로 실행하면:
   1. 저장된 상태 파일이 있으면 삭제하고 (없으면 그냥 넘어가고, 에러를 내지
      않고),
-  2. Tk 윈도우를 생성하거나 mainloop()를 호출하지 *않고* 즉시
+  2. `ctk.CTk()` 윈도우를 생성하거나 mainloop()를 호출하지 *않고* 즉시
      프로세스를 종료해야 합니다.
   이 `--reset` 처리는 반드시 윈도우 생성/mainloop 코드보다 먼저 실행되도록
-  파일 맨 앞쪽에 두세요 (예: `if "--reset" in sys.argv:` 분기를 먼저 처리하고
-  `sys.exit(0)`). `--reset` 인자 없이 실행할 때는 평소처럼 상태를 불러와
-  윈도우를 띄우고 mainloop()를 시작하세요.
+  파일 맨 앞쪽에 두세요 (예: `if "--reset" in sys.argv:` 분기를 `import
+  customtkinter`보다도 먼저 처리하고 `sys.exit(0)`). `--reset` 인자 없이
+  실행할 때는 평소처럼 상태를 불러와 윈도우를 띄우고 mainloop()를
+  시작하세요.
 - 이전 시도의 문법 오류(python -m py_compile)가 주어지면 반드시 고치세요.
+{visibility_rule}
+{drag_drop_rule}
+  (customtkinter에서는 `ctk.CTkLabel`에 클릭 이벤트만 바인딩해서 "링크처럼"
+  만들지 말고, 반드시 `ctk.CTkButton`을 쓰세요.)
 - index_html/style_css/app_js 필드는 이 launch_type에서는 사용하지 않으니
   빈 문자열("")로 반환하세요. main_js/package_json 필드는 null로 두세요.
 - launch_config.launch_type은 항상 "python_tkinter"로 고정하세요.
   launch_command/entry_url은 실제 실행에는 쓰이지 않으니 대략적인 설명만
   적으면 됩니다 (entry_url은 빈 문자열로 두어도 됩니다).
-"""
+""".format(
+    visibility_rule=CLICKABLE_ELEMENT_VISIBILITY_RULE, drag_drop_rule=DRAG_DROP_VISIBILITY_RULE
+)
 
 
 class DeveloperLintError(RuntimeError):

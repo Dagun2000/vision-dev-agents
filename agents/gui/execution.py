@@ -293,7 +293,18 @@ def open_native_app_maximized(
     # PATH first, same fix as the Developer agent's eslint invocation.
     resolved = shutil.which(command[0]) or command[0]
     try:
-        subprocess.Popen([resolved, *command[1:]], cwd=cwd, env=env)
+        # stderr captured so a crash before any window appears is
+        # diagnosable from our own logs -- confirmed necessary: a
+        # generated app that raised a TypeError during startup produced no
+        # error here at all, just "no window detected", and was only
+        # diagnosable by manually re-running the script by hand. Only read
+        # from it in the failure branch below (and only once the process
+        # has already exited) so a long-running, healthy app's stderr
+        # output is never drained mid-run.
+        process = subprocess.Popen(
+            [resolved, *command[1:]], cwd=cwd, env=env,
+            stderr=subprocess.PIPE, text=True, errors="replace",
+        )
     except OSError as exc:
         logger.warning("GUI: could not launch native app %r (%s)", command, exc)
         screen_width, screen_height = pyautogui.size()
@@ -302,7 +313,16 @@ def open_native_app_maximized(
     time.sleep(NATIVE_APP_OPEN_WAIT_SECONDS)
     window = _wait_for_new_window(existing_handles)
     if window is None:
-        logger.warning("GUI: no newly-opened native app window detected, falling back to getActiveWindow()")
+        if process.poll() is not None and process.stderr is not None:
+            stderr_output = process.stderr.read().strip()
+            logger.warning(
+                "GUI: native app process exited early (code=%s) before any window "
+                "appeared -- stderr:\n%s",
+                process.returncode,
+                stderr_output or "(no stderr output)",
+            )
+        else:
+            logger.warning("GUI: no newly-opened native app window detected, falling back to getActiveWindow()")
         window = gw.getActiveWindow()
 
     if window is None:
@@ -363,6 +383,19 @@ def exit_fullscreen() -> None:
     pyautogui.press("f11")
 
 
+class WindowLostError(RuntimeError):
+    """The tracked window's hwnd no longer resolves to any live window --
+    it was closed (crashed, or the user/OS closed it) sometime after we
+    started tracking it. Without this, capture_screenshot() would silently
+    fall back to screenshotting whatever now happens to occupy the same
+    screen coordinates (e.g. the dashboard browser window behind it),
+    which the Vision model then reasons about as if it were still the
+    target app -- confirmed in practice: a mid-Phase crash produced a
+    screenshot of an unrelated Chrome tab, and the model spent its entire
+    remaining step budget clicking around browser chrome trying to find
+    its way back, with no way to know the actual target app was gone."""
+
+
 def capture_screenshot(window: BrowserWindow) -> Image.Image:
     """Screenshot `window`'s region. Re-activates the window by hwnd first:
     pyautogui.screenshot() captures whatever pixels are physically at that
@@ -371,7 +404,18 @@ def capture_screenshot(window: BrowserWindow) -> Image.Image:
     top of our window, a stale `window.region` would otherwise silently
     screenshot the wrong app -- confirmed happening in practice, not just
     a theoretical risk.
+
+    Raises WindowLostError if the window's hwnd no longer resolves to any
+    live window at all (as opposed to merely losing focus, which
+    _reactivate_if_possible recovers from) -- see WindowLostError's
+    docstring for why this needs to be a hard stop rather than a silent
+    fallback.
     """
+    if window.hwnd is not None and _find_live_window(window) is None:
+        raise WindowLostError(
+            f"Tracked window (hwnd={window.hwnd}) no longer exists -- it was "
+            "closed or crashed after launch."
+        )
     _reactivate_if_possible(window)
     return pyautogui.screenshot(region=window.region)
 
@@ -382,6 +426,45 @@ def click_at(window: BrowserWindow, local_x: int, local_y: int) -> None:
     Re-activates the window first for the same reason as capture_screenshot."""
     _reactivate_if_possible(window)
     pyautogui.click(window.left + local_x, window.top + local_y)
+    time.sleep(CLICK_SETTLE_SECONDS)
+
+
+DRAG_STEP_COUNT = 12
+DRAG_STEP_DURATION_SECONDS = 0.04
+DRAG_HOLD_SETTLE_SECONDS = 0.15
+
+
+def drag_at(
+    window: BrowserWindow,
+    start_local_xy: tuple[int, int],
+    end_local_xy: tuple[int, int],
+) -> None:
+    """Drag from one point to another, both given in screenshot-local
+    coordinates. Moves in several small steps between mouse-down and
+    mouse-up (rather than one instant jump) so real intermediate
+    mousemove events fire along the way -- most JS drag implementations
+    (native HTML5 drag-and-drop *and* pointer-based libraries like
+    SortableJS/dnd-kit) only recognize a drag once the pointer has moved
+    a minimum distance after mousedown; a single teleport from A to B can
+    read as a plain click-release instead of a drag. Re-activates the
+    window first for the same reason as capture_screenshot()/click_at().
+    """
+    _reactivate_if_possible(window)
+    start_x, start_y = window.left + start_local_xy[0], window.top + start_local_xy[1]
+    end_x, end_y = window.left + end_local_xy[0], window.top + end_local_xy[1]
+
+    pyautogui.moveTo(start_x, start_y)
+    pyautogui.mouseDown()
+    time.sleep(DRAG_HOLD_SETTLE_SECONDS)
+    for step in range(1, DRAG_STEP_COUNT + 1):
+        t = step / DRAG_STEP_COUNT
+        pyautogui.moveTo(
+            start_x + round((end_x - start_x) * t),
+            start_y + round((end_y - start_y) * t),
+            duration=DRAG_STEP_DURATION_SECONDS,
+        )
+    time.sleep(DRAG_HOLD_SETTLE_SECONDS)
+    pyautogui.mouseUp()
     time.sleep(CLICK_SETTLE_SECONDS)
 
 
@@ -499,16 +582,31 @@ def clear_local_storage(window: BrowserWindow) -> bool:
 
 
 def type_text(text: str) -> None:
-    """Type `text` into whatever currently has focus.
+    """Replace whatever's in the currently-focused field with `text`.
 
     Uses clipboard paste (Ctrl+V) rather than pyautogui.typewrite()/write():
     typewrite() simulates individual keystrokes from a fixed US-keyboard
     layout, which can't produce Korean (or other IME-composed) text --
     exactly what this project's success_criteria are written in. Clipboard
     paste sidesteps keystroke simulation entirely, so it's Unicode-safe.
+
+    Selects all existing content first (Ctrl+A, a real keystroke -- not
+    something typed/pasted) so the paste *replaces* it. Without this,
+    confirmed by direct testing: pasting only inserts at the current
+    cursor position, so re-typing into a field that already has leftover
+    text from a previous attempt (e.g. a login retry after a failed one)
+    appends onto it instead of replacing it -- producing a garbled,
+    concatenated mess. The model noticed this itself in one run and tried
+    to work around it by embedding literal backspace/Ctrl+A *characters*
+    (\\x08, \\x01) inside the `text` string, which does nothing useful --
+    paste doesn't interpret control characters as keystrokes, it just
+    inserts them as literal unprintable glyphs. Fixed at the source
+    instead of relying on the model to route around it.
     """
     previous_clipboard = pyperclip.paste()
     try:
+        pyautogui.hotkey("ctrl", "a")
+        time.sleep(PASTE_SETTLE_SECONDS)
         pyperclip.copy(text)
         time.sleep(PASTE_SETTLE_SECONDS)
         pyautogui.hotkey("ctrl", "v")

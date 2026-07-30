@@ -97,8 +97,17 @@ def detect_clickable_elements(image: Image.Image) -> list[BoundingBox]:
     # Low thresholds + a real morphological close (not just dilate) so
     # low-contrast borders (e.g. a light-grey 1px input outline) still
     # trace as one continuous closed loop instead of a broken contour.
+    #
+    # Kernel size/iterations matter a lot here: a (5,5) kernel x2 iterations
+    # (confirmed by direct testing) bridges gaps up to ~10-13px, which is
+    # enough to merge two visually-separate adjacent buttons into one
+    # contour whenever their gap is smaller than that -- confirmed on a
+    # real case (two 7px-apart card-action buttons, each with its own
+    # border, detected as a single box). (3,3) x1 iteration still closes a
+    # single low-contrast border into one loop and still correctly detects
+    # a solid-fill button, but no longer bridges a 7px inter-element gap.
     edges = cv2.Canny(gray, 20, 60)
-    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8), iterations=2)
+    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8), iterations=1)
 
     contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
 

@@ -72,7 +72,10 @@ else about how a run behaves.
 ### Current status: three launch types implemented
 
 `agents/models.py`'s `LaunchType` has four values. `STATIC_WEB_SERVER`,
-`ELECTRON_APP`, and `PYTHON_TKINTER` (a POC — see below) are implemented;
+`ELECTRON_APP`, and `PYTHON_TKINTER` (a POC, generated code uses
+[customtkinter](https://github.com/TomSchimansky/CustomTkinter) rather than
+plain stdlib `tkinter` for a modern look while staying genuinely native/
+non-Chromium — see below) are implemented;
 `NATIVE_EXE` is a deliberate unimplemented placeholder — see "Adding a new
 launch type" for why new native targets each get their own specific enum
 value instead of being folded into it. `agents/gui_tester.py`'s
@@ -344,7 +347,10 @@ Planner가 "무엇을 시도했다가 왜 실패했고 대신 뭐가 통했는�
 ### 현재 상태: 3가지 실행 방식 구현됨
 
 `agents/models.py`의 `LaunchType`에는 값이 4개 있습니다. `STATIC_WEB_SERVER`,
-`ELECTRON_APP`, `PYTHON_TKINTER`(POC — 아래 참고)는 구현되어 있고,
+`ELECTRON_APP`, `PYTHON_TKINTER`(POC — 생성되는 코드는 표준 tkinter가 아니라
+[customtkinter](https://github.com/TomSchimansky/CustomTkinter)를 사용해서,
+Chromium이 아닌 진짜 네이티브 렌더링은 유지하면서도 더 모던하게 보이도록
+함 — 아래 참고)는 구현되어 있고,
 `NATIVE_EXE`는 의도적으로 비워둔 자리입니다 — 새로운 네이티브 타겟을 왜
 여기 합치지 않고 각자 전용 enum 값으로 추가하는지는 아래 "새로운 실행
 방식 추가하기" 참고. `agents/gui_tester.py`의 `launch_app()` 디스패처는

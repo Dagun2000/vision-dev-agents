@@ -105,13 +105,20 @@ class GUIActionSchema(BaseModel):
     what element N is and what to do next.
     """
 
-    action: Literal["click", "type", "success", "failure"] = Field(
+    action: Literal["click", "type", "drag", "success", "failure"] = Field(
         description="click: N번 요소를 클릭한다. type: N번 요소에 텍스트를 입력한다. "
+        "drag: target_element 요소를 drop_target_element 요소 위로 드래그해서 놓는다. "
         "success: 화면 상태만으로 success_criteria가 이미 충족되었다고 판단됨. "
         "failure: 더 진행해도 success_criteria를 충족시킬 수 없다고 판단됨."
     )
     target_element: int | None = Field(
-        default=None, description="action이 click 또는 type일 때, 대상 요소의 번호 (스크린샷의 빨간 배지 숫자)"
+        default=None,
+        description="action이 click/type/drag일 때, 대상(드래그할) 요소의 번호 (스크린샷의 빨간 배지 숫자)",
+    )
+    drop_target_element: int | None = Field(
+        default=None,
+        description="action이 drag일 때, target_element를 놓을 목적지 요소의 번호. "
+        "drag가 아니면 null.",
     )
     text: str | None = Field(default=None, description="action이 type일 때 입력할 텍스트")
     criterion_failed: str | None = Field(
